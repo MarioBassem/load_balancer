@@ -1,14 +1,22 @@
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Server {
     pub url: String,
     pub name: String,
+    pub disabled: bool,
+    pub weight: u32,
+    pub health_check_period: u32, // in seconds
+
+    #[serde(skip_deserializing)]
     pub connections: u32,
+
+    #[serde(skip_deserializing)]
+    pub healthy: bool,
 }
 
 impl Ord for Server {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         if self.connections < other.connections {
             return Ordering::Less;
         }
@@ -21,7 +29,7 @@ impl Ord for Server {
     }
 }
 impl PartialOrd for Server {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.connections.partial_cmp(&other.connections)
     }
 }
