@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = {version = "4", features = ["derive"]}
+clap = { version = "4", features = ["derive"] }
 hyper = { version = "1", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
 http-body-util = "0.1"
@@ -15,3 +15,6 @@ priority-queue = "1.3.2"
 reqwest = "0.11.22"
 log = "0.4.20"
 simple_logger = "4.3.0"
+url = "2.5.0"
+serde_yaml = "0.9.27"
+serde = { version = "1.0", features = ["derive"] }
