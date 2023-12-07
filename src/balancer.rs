@@ -21,6 +21,7 @@ pub enum BalancerError {
     Lock(String),
     MyError(String),
     ConfigError(serde_yaml::Error),
+    ParseError(url::ParseError),
 }
 
 pub fn new(path: Option<&Path>) -> Result<Balancer, BalancerError> {
@@ -47,8 +48,17 @@ impl Balancer {
     fn get_servers<R: std::io::Read>(r: R) -> Result<HashMap<String, Server>, BalancerError> {
         let d: Vec<Server> =
             serde_yaml::from_reader(r).map_err(|error| BalancerError::ConfigError(error))?;
-        let map: HashMap<String, Server> = d.into_iter().map(|v| (v.url.clone(), v)).collect();
-        return Ok(map);
+        let map: Result<HashMap<String, Server>, BalancerError> = d
+            .into_iter()
+            .map(|v| {
+                if let Err(error) = url::Url::parse(&v.url) {
+                    return Err(BalancerError::ParseError(error));
+                }
+                Ok((v.url.clone(), v))
+            })
+            .collect();
+
+        return Ok(map?);
     }
 
     pub async fn listen(self) -> Result<(), BalancerError> {
