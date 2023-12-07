@@ -5,13 +5,13 @@ use hyper::{body::Incoming as IncomingBody, Request, Response};
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
 pub struct Balancer {
-    // servers: Vec<Server>,
     servers: Mutex<HashMap<String, Server>>,
 }
 
@@ -20,32 +20,37 @@ pub enum BalancerError {
     IO(std::io::Error),
     Lock(String),
     MyError(String),
+    ConfigError(serde_yaml::Error),
 }
 
-pub fn new() -> Balancer {
-    let mut servers = HashMap::new();
-    servers.insert(
-        "127.0.0.1:3001".to_string(),
-        Server {
-            url: "127.0.0.1:3001".to_string(),
-            connections: 0,
-            name: "server1".to_string(),
-        },
-    );
-    servers.insert(
-        "127.0.0.1:3002".to_string(),
-        Server {
-            url: "127.0.0.1:3002".to_string(),
-            connections: 0,
-            name: "server2".to_string(),
-        },
-    );
-    return Balancer {
-        servers: Mutex::new(servers),
-    };
+pub fn new(path: Option<&Path>) -> Result<Balancer, BalancerError> {
+    if let Some(p) = path {
+        let map = Balancer::read_config_file(p)?;
+        return Ok(Balancer {
+            servers: Mutex::new(map),
+        });
+    }
+
+    return Ok(Balancer {
+        servers: Mutex::new(HashMap::new()),
+    });
 }
 
 impl Balancer {
+    fn read_config_file(p: &Path) -> Result<HashMap<String, Server>, BalancerError> {
+        let f = std::fs::File::open(p).map_err(|error| BalancerError::IO(error))?;
+        let map = Balancer::get_servers(f)?;
+
+        return Ok(map);
+    }
+
+    fn get_servers<R: std::io::Read>(r: R) -> Result<HashMap<String, Server>, BalancerError> {
+        let d: Vec<Server> =
+            serde_yaml::from_reader(r).map_err(|error| BalancerError::ConfigError(error))?;
+        let map: HashMap<String, Server> = d.into_iter().map(|v| (v.url.clone(), v)).collect();
+        return Ok(map);
+    }
+
     pub async fn listen(self) -> Result<(), BalancerError> {
         // run http server
         // balancer listens for incoming requests
@@ -156,4 +161,61 @@ async fn delegate(
     let res = sender.send_request(req).await?;
 
     return Ok(res);
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use crate::server::Server;
+
+    use super::Balancer;
+
+    #[test]
+    fn deserialize_servers() {
+        let text = "
+- name: server1
+  url: 127.0.0.1:3001
+  disabled: false
+  weight: 1
+  health_check_period: 5
+
+- name: server2
+  url: 127.0.0.1:3002
+  disabled: TRUE
+  weight: 2
+  health_check_period: 7
+        ";
+        let c = std::io::Cursor::new(text);
+
+        let got = Balancer::get_servers(c).unwrap();
+        let want = HashMap::from([
+            (
+                "127.0.0.1:3001".to_string(),
+                Server {
+                    url: "127.0.0.1:3001".to_string(),
+                    connections: 0,
+                    disabled: false,
+                    name: "server1".to_string(),
+                    weight: 1,
+                    health_check_period: 5,
+                    healthy: false,
+                },
+            ),
+            (
+                "127.0.0.1:3002".to_string(),
+                Server {
+                    url: "127.0.0.1:3002".to_string(),
+                    connections: 0,
+                    disabled: true,
+                    name: "server2".to_string(),
+                    weight: 2,
+                    health_check_period: 7,
+                    healthy: false,
+                },
+            ),
+        ]);
+
+        assert_eq!(got, want)
+    }
 }
