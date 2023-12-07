@@ -17,11 +17,13 @@ pub struct Server {
 
 impl Ord for Server {
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.connections < other.connections {
+        if self.connections < other.connections
+            || (self.connections == other.connections && self.weight > other.weight)
+        {
             return Ordering::Less;
         }
 
-        if self.connections == other.connections {
+        if self.connections == other.connections && self.weight == other.weight {
             return Ordering::Equal;
         }
 
