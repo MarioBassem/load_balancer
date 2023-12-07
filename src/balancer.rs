@@ -5,14 +5,13 @@ use hyper::{body::Incoming as IncomingBody, Request, Response};
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-
 pub struct Balancer {
     servers: Mutex<HashMap<String, Server>>,
+    port: u16,
 }
 
 #[derive(Debug)]
@@ -24,22 +23,24 @@ pub enum BalancerError {
     ParseError(url::ParseError),
 }
 
-pub fn new(path: Option<&Path>) -> Result<Balancer, BalancerError> {
+pub fn new(path: Option<String>, port: u16) -> Result<Balancer, BalancerError> {
     if let Some(p) = path {
         let map = Balancer::read_config_file(p)?;
         return Ok(Balancer {
             servers: Mutex::new(map),
+            port: port,
         });
     }
 
     return Ok(Balancer {
         servers: Mutex::new(HashMap::new()),
+        port: port,
     });
 }
 
 impl Balancer {
-    fn read_config_file(p: &Path) -> Result<HashMap<String, Server>, BalancerError> {
-        let f = std::fs::File::open(p).map_err(|error| BalancerError::IO(error))?;
+    fn read_config_file(path: String) -> Result<HashMap<String, Server>, BalancerError> {
+        let f = std::fs::File::open(path).map_err(|error| BalancerError::IO(error))?;
         let map = Balancer::get_servers(f)?;
 
         return Ok(map);
@@ -66,7 +67,7 @@ impl Balancer {
         // balancer listens for incoming requests
         // balancer decides which server to reroute request to
         // balancer updates chosen server status
-        let addr: SocketAddr = ([127, 0, 0, 1], 3000).into();
+        let addr: SocketAddr = ([127, 0, 0, 1], self.port).into();
 
         let listener = TcpListener::bind(addr)
             .await

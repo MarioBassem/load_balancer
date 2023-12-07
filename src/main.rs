@@ -6,7 +6,16 @@ use clap::Parser;
 use std::fmt::Display;
 
 #[derive(Parser, Debug)]
-struct Params {}
+struct Params {
+    #[clap(short, long)]
+    config: Option<String>,
+
+    #[clap(short, long, default_value_t = 3000)]
+    port: u16,
+
+    #[clap(short, long, default_value_t = false)]
+    debug: bool,
+}
 
 impl Display for BalancerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -15,7 +24,7 @@ impl Display for BalancerError {
 }
 
 async fn app(params: Params) -> Result<(), BalancerError> {
-    let balancer = balancer::new();
+    let balancer = balancer::new(params.config, params.port)?;
     balancer.listen().await?;
 
     Ok(())
