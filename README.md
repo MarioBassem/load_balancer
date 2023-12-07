@@ -1,6 +1,6 @@
 # Load Balancer
 
-This is a load balancer. I build it for learning purposes, use it at your own risk :D
+This is a load balancer. I build it for learning purposes, part of the coding challenges from <https://codingchallenges.fyi/>
 
 ## How it works
 
@@ -12,6 +12,7 @@ This is a load balancer. I build it for learning purposes, use it at your own ri
   - server endpoint (hostname:port) (required)
   - health check path
   - health check period
+  - server weight
 - it allows to register new servers.
 
 ### Components
@@ -21,4 +22,4 @@ This is a load balancer. I build it for learning purposes, use it at your own ri
   - mainpulates configurations
   - exposes an api to manipulate server configs
   - performs health checks for each server periodically
-  - balances between incoming requests using `least connections` method
+  - balances between incoming requests using `least connections` method and server weights
