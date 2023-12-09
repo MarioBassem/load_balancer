@@ -1,39 +1,47 @@
 use crate::server::Server;
+use crossbeam_channel::{bounded, select};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{body::Incoming as IncomingBody, Request, Response};
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use url::ParseError;
+
 pub struct Balancer {
-    servers: Mutex<HashMap<String, Server>>,
+    servers: HashMap<String, Server>,
     port: u16,
 }
 
 #[derive(Debug)]
 pub enum BalancerError {
     IO(std::io::Error),
-    Lock(String),
     MyError(String),
     ConfigError(serde_yaml::Error),
-    ParseError(url::ParseError),
+    ParseError(ParseError),
+}
+
+#[derive(Debug)]
+enum BalancerRequest {
+    DecrementServerConnections(String),
+    AddServer(Server),
+    DeleteServer(String),
+    ModifyServer(Server),
 }
 
 pub fn new(path: Option<String>, port: u16) -> Result<Balancer, BalancerError> {
     if let Some(p) = path {
         let map = Balancer::read_config_file(p)?;
         return Ok(Balancer {
-            servers: Mutex::new(map),
+            servers: map,
             port: port,
         });
     }
 
     return Ok(Balancer {
-        servers: Mutex::new(HashMap::new()),
+        servers: HashMap::new(),
         port: port,
     });
 }
@@ -62,7 +70,7 @@ impl Balancer {
         return Ok(map?);
     }
 
-    pub async fn listen(self) -> Result<(), BalancerError> {
+    pub async fn listen(&mut self) -> Result<(), BalancerError> {
         // run http server
         // balancer listens for incoming requests
         // balancer decides which server to reroute request to
@@ -73,68 +81,175 @@ impl Balancer {
             .await
             .map_err(|e| BalancerError::IO(e))?;
         log::info!("Listening on http://{}", addr);
+        let (request_tx, request_rx) = bounded(0);
+        let (balancer_tx, worker_rx) = bounded(0);
 
-        let balancer_ref = Arc::new(self);
-        loop {
-            let (stream, _) = listener.accept().await.map_err(|e| BalancerError::IO(e))?;
-            let io = TokioIo::new(stream);
-            let cl = balancer_ref.clone();
-            tokio::task::spawn(async move {
-                let url = match cl.assign_server() {
-                    Ok(url) => url,
+        tokio::spawn(async move {
+            loop {
+                let tx = request_tx.clone();
+                let rx = worker_rx.clone();
+                let (stream, _) = match listener.accept().await {
+                    Ok(stream) => stream,
                     Err(error) => {
-                        log::error!("failed to get server url: {:?}", error);
-                        return;
+                        log::error!("failed to accept connection: {}", error);
+                        continue;
                     }
                 };
 
-                let url_clone = url.clone();
-                let service = service_fn(move |req| delegate(url.clone(), req));
+                let io = TokioIo::new(stream);
+                tokio::task::spawn(async move {
+                    // wait for balancer to send url
+                    let url: String = match rx.recv() {
+                        Ok(s) => s,
+                        Err(error) => {
+                            log::error!("failed to receive server url from balancer: {}", error);
+                            return;
+                        }
+                    };
+                    log::debug!("delegating to {}", url);
+                    let address = url.clone();
+                    let service = service_fn(move |req| delegate(url.clone(), req));
 
-                if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                    log::error!("Failed to serve connection: {:?}", err);
-                }
+                    if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
+                        log::error!("Failed to serve connection: {:?}", err);
+                    }
 
-                if let Err(error) = cl.decrement_server_connections(url_clone) {
-                    log::error!("failed to decrement server connections: {:?}", error);
-                    return;
+                    if let Err(error) =
+                        tx.send(BalancerRequest::DecrementServerConnections(address))
+                    {
+                        log::error!(
+                            "failed to send decrement server connections signal: {}",
+                            error
+                        );
+                    }
+                });
+            }
+        });
+
+        loop {
+            log::debug!("balancer waiting for requests...");
+            let next = match self.choose_next_server() {
+                Ok(url) => url,
+                Err(error) => {
+                    // should never happen
+                    log::error!("failed to get next server address: {}", error);
+                    "".to_string()
                 }
-            });
+            };
+
+            select! {
+                recv(request_rx) -> receive_result =>{
+                    let req = match receive_result{
+                        Ok(req) => req,
+                        Err(error) => {
+                            log::error!("failed to receive balancer request: {}", error);
+                            continue;
+                        }
+                    };
+
+                    log::debug!("got request: {:?}", req);
+                    let res = match req {
+                        BalancerRequest::DecrementServerConnections(url) => {
+                            self.decrement_server_connections(url)
+                        },
+                        BalancerRequest::AddServer(server) => {
+                            self.add_server(server)
+                        },
+                        BalancerRequest::DeleteServer(url) =>{
+                            self.delete_server(url)
+                        },
+                        BalancerRequest::ModifyServer(server) =>{
+                            self.modify_server(server)
+                        },
+                    };
+
+                    if let Err(error) = res{
+                        log::error!("failed to perfrom request: {}", error)
+                    }
+                },
+                send(balancer_tx, next.clone()) -> send_result => {
+                    if let Err(error) = send_result{
+                        log::error!("failed to send next server url signal: {}", error);
+                    }
+
+                    if let Err(error) = self.increment_server_connections(next){
+                        log::error!("failed to increment server connections: {}", error);
+                    }
+                },
+            };
         }
     }
 
-    fn assign_server(&self) -> Result<String, BalancerError> {
-        let mut servers_guard = self
-            .servers
-            .lock()
-            .map_err(|error| BalancerError::Lock(error.to_string()))?;
+    fn add_server(&mut self, server: Server) -> Result<(), BalancerError> {
+        if self.servers.contains_key(&server.url) {
+            return Err(BalancerError::MyError(format!(
+                "a server with url {} already exists",
+                server.url
+            )));
+        }
 
-        let least_connections_server =
-            servers_guard
-                .values_mut()
-                .min_by(|x, y| x.cmp(y))
-                .ok_or(BalancerError::MyError(
-                    "failed to find min connections server: no servers found".to_string(),
-                ))?;
+        self.servers.insert(server.url.clone(), server);
 
-        least_connections_server.connections += 1;
-
-        log::debug!(
-            "server {} has {} open connections",
-            least_connections_server.name,
-            least_connections_server.connections
-        );
-
-        return Ok(least_connections_server.url.clone());
+        Ok(())
     }
 
-    fn decrement_server_connections(&self, url: String) -> Result<(), BalancerError> {
-        let mut servers_guard = self
-            .servers
-            .lock()
-            .map_err(|error| BalancerError::Lock(error.to_string()))?;
+    fn delete_server(&mut self, url: String) -> Result<(), BalancerError> {
+        // prevent deleting all servers
+        if !self.servers.contains_key(&url) {
+            return Err(BalancerError::MyError(format!(
+                "server with url {} not found",
+                url
+            )));
+        }
 
-        let server = servers_guard
+        if self.servers.len() == 1 {
+            return Err(BalancerError::MyError(
+                "balancer cannot delete the only active server".to_string(),
+            ));
+        }
+
+        self.servers.remove_entry(&url);
+
+        Ok(())
+    }
+
+    fn modify_server(&mut self, server: Server) -> Result<(), BalancerError> {
+        // prevent disabling all servers
+        todo!()
+    }
+
+    fn choose_next_server(&self) -> Result<String, BalancerError> {
+        let least_connections_server = self.servers.values().min_by(|x, y| x.cmp(y));
+
+        let server = match least_connections_server {
+            Some(server) => server,
+            None => {
+                return Err(BalancerError::MyError(format!(
+                    "balancer has 0 working servers"
+                )))
+            }
+        };
+
+        return Ok(server.url.clone());
+    }
+
+    fn increment_server_connections(&mut self, url: String) -> Result<(), BalancerError> {
+        match self.servers.get_mut(&url) {
+            Some(server) => server.connections += 1,
+            None => {
+                return Err(BalancerError::MyError(format!(
+                    "server with url {} not found",
+                    url
+                )))
+            }
+        }
+
+        Ok(())
+    }
+
+    fn decrement_server_connections(&mut self, url: String) -> Result<(), BalancerError> {
+        let server = self
+            .servers
             .get_mut(&url)
             .ok_or(BalancerError::MyError(format!(
                 "failed to find server with url {}",
@@ -157,12 +272,14 @@ async fn delegate(
     url: String,
     req: Request<IncomingBody>,
 ) -> Result<Response<IncomingBody>, Box<dyn std::error::Error + Send + Sync>> {
-    let stream = TcpStream::connect(url).await?;
+    let parsed_url = url::Url::parse(&url)?;
+
+    let addrs = parsed_url.socket_addrs(|| None)?;
+    let stream = TcpStream::connect(addrs[0]).await?;
     let io = TokioIo::new(stream);
 
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
 
-    // shouldn't this be closed??
     tokio::task::spawn(async move {
         if let Err(err) = conn.await {
             log::error!("Connection failed: {:?}", err);
@@ -176,7 +293,7 @@ async fn delegate(
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, os::unix::net::SocketAddr};
 
     use crate::server::Server;
 
@@ -186,25 +303,24 @@ mod test {
     fn deserialize_servers() {
         let text = "
 - name: server1
-  url: 127.0.0.1:3001
+  url: http://127.0.0.1:3001
   disabled: false
   weight: 1
   health_check_period: 5
 
 - name: server2
-  url: 127.0.0.1:3002
+  url: http://127.0.0.1:3002
   disabled: TRUE
   weight: 2
   health_check_period: 7
         ";
         let c = std::io::Cursor::new(text);
-
         let got = Balancer::get_servers(c).unwrap();
         let want = HashMap::from([
             (
-                "127.0.0.1:3001".to_string(),
+                "http://127.0.0.1:3001".to_string(),
                 Server {
-                    url: "127.0.0.1:3001".to_string(),
+                    url: "http://127.0.0.1:3001".to_string(),
                     connections: 0,
                     disabled: false,
                     name: "server1".to_string(),
@@ -214,9 +330,9 @@ mod test {
                 },
             ),
             (
-                "127.0.0.1:3002".to_string(),
+                "http://127.0.0.1:3002".to_string(),
                 Server {
-                    url: "127.0.0.1:3002".to_string(),
+                    url: "http://127.0.0.1:3002".to_string(),
                     connections: 0,
                     disabled: true,
                     name: "server2".to_string(),
