@@ -1,4 +1,6 @@
+mod api_service;
 mod balancer;
+mod balancer_service;
 mod server;
 
 use balancer::BalancerError;
@@ -13,6 +15,9 @@ struct Params {
     #[clap(short, long, default_value_t = 3000)]
     port: u16,
 
+    #[clap(short, long, default_value_t = 8000)]
+    api_port: u16,
+
     #[clap(short, long, default_value_t = false)]
     debug: bool,
 }
@@ -24,7 +29,7 @@ impl Display for BalancerError {
 }
 
 async fn app(params: Params) -> Result<(), BalancerError> {
-    let balancer = balancer::new(params.config, params.port)?;
+    let mut balancer = balancer::new(params.config, params.port, params.api_port)?;
     balancer.listen().await?;
 
     Ok(())

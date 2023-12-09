@@ -1,10 +1,18 @@
 use crate::server::Server;
-use crossbeam_channel::{bounded, select};
+use crate::{api_service, balancer_service};
+use crossbeam_channel::{bounded, select, Receiver, Sender};
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, BodyStream};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{body::Incoming as IncomingBody, Request, Response};
+use hyper::StatusCode;
+use hyper::{
+    body::{Body, Incoming},
+    Request, Response,
+};
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -13,6 +21,7 @@ use url::ParseError;
 pub struct Balancer {
     servers: HashMap<String, Server>,
     port: u16,
+    api_port: u16,
 }
 
 #[derive(Debug)]
@@ -24,25 +33,33 @@ pub enum BalancerError {
 }
 
 #[derive(Debug)]
-enum BalancerRequest {
+pub enum BalancerRequest {
     DecrementServerConnections(String),
     AddServer(Server),
     DeleteServer(String),
-    ModifyServer(Server),
+    UpdateServer(Server),
 }
 
-pub fn new(path: Option<String>, port: u16) -> Result<Balancer, BalancerError> {
+#[derive(Debug)]
+pub enum BalancerResponse {
+    Ok,
+    Error(StatusCode, String), // status code, error message
+}
+
+pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer, BalancerError> {
     if let Some(p) = path {
         let map = Balancer::read_config_file(p)?;
         return Ok(Balancer {
             servers: map,
-            port: port,
+            port,
+            api_port,
         });
     }
 
     return Ok(Balancer {
         servers: HashMap::new(),
-        port: port,
+        port,
+        api_port,
     });
 }
 
@@ -81,50 +98,27 @@ impl Balancer {
             .await
             .map_err(|e| BalancerError::IO(e))?;
         log::info!("Listening on http://{}", addr);
+
+        let api_addr: SocketAddr = ([127, 0, 0, 1], self.api_port).into();
+        let api_listener = TcpListener::bind(api_addr)
+            .await
+            .map_err(|e| BalancerError::IO(e))?;
+        log::info!("API Listening on http://{}", api_addr);
+
         let (request_tx, request_rx) = bounded(0);
         let (balancer_tx, worker_rx) = bounded(0);
+        let (api_tx, api_rx) = bounded(0);
 
-        tokio::spawn(async move {
-            loop {
-                let tx = request_tx.clone();
-                let rx = worker_rx.clone();
-                let (stream, _) = match listener.accept().await {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        log::error!("failed to accept connection: {}", error);
-                        continue;
-                    }
-                };
-
-                let io = TokioIo::new(stream);
-                tokio::task::spawn(async move {
-                    // wait for balancer to send url
-                    let url: String = match rx.recv() {
-                        Ok(s) => s,
-                        Err(error) => {
-                            log::error!("failed to receive server url from balancer: {}", error);
-                            return;
-                        }
-                    };
-                    log::debug!("delegating to {}", url);
-                    let address = url.clone();
-                    let service = service_fn(move |req| delegate(url.clone(), req));
-
-                    if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                        log::error!("Failed to serve connection: {:?}", err);
-                    }
-
-                    if let Err(error) =
-                        tx.send(BalancerRequest::DecrementServerConnections(address))
-                    {
-                        log::error!(
-                            "failed to send decrement server connections signal: {}",
-                            error
-                        );
-                    }
-                });
-            }
-        });
+        tokio::spawn(api_service::balancer_api_listener(
+            api_listener,
+            request_tx.clone(),
+            api_rx.clone(),
+        ));
+        tokio::spawn(balancer_service::balancer_listener(
+            listener,
+            request_tx.clone(),
+            worker_rx.clone(),
+        ));
 
         loop {
             log::debug!("balancer waiting for requests...");
@@ -158,7 +152,7 @@ impl Balancer {
                         BalancerRequest::DeleteServer(url) =>{
                             self.delete_server(url)
                         },
-                        BalancerRequest::ModifyServer(server) =>{
+                        BalancerRequest::UpdateServer(server) =>{
                             self.modify_server(server)
                         },
                     };
@@ -266,29 +260,6 @@ impl Balancer {
 
         Ok(())
     }
-}
-
-async fn delegate(
-    url: String,
-    req: Request<IncomingBody>,
-) -> Result<Response<IncomingBody>, Box<dyn std::error::Error + Send + Sync>> {
-    let parsed_url = url::Url::parse(&url)?;
-
-    let addrs = parsed_url.socket_addrs(|| None)?;
-    let stream = TcpStream::connect(addrs[0]).await?;
-    let io = TokioIo::new(stream);
-
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
-
-    tokio::task::spawn(async move {
-        if let Err(err) = conn.await {
-            log::error!("Connection failed: {:?}", err);
-        }
-    });
-
-    let res = sender.send_request(req).await?;
-
-    return Ok(res);
 }
 
 #[cfg(test)]
