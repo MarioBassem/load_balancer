@@ -1,6 +1,7 @@
 mod api_service;
 mod balancer;
 mod balancer_service;
+mod health_check_service;
 mod server;
 
 use balancer::BalancerError;

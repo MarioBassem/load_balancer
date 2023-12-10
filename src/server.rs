@@ -4,9 +4,8 @@ use std::cmp::Ordering;
 pub struct Server {
     pub url: String,
     pub name: String,
-    pub disabled: bool,
     pub weight: u32,
-    pub health_check_period: u32, // in seconds
+    pub health_check_period: u64, // in seconds
 
     #[serde(skip_deserializing)]
     pub connections: u32,
@@ -17,13 +16,17 @@ pub struct Server {
 
 impl Ord for Server {
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.connections < other.connections
-            || (self.connections == other.connections && self.weight > other.weight)
+        if self.healthy && self.connections < other.connections
+            || (self.healthy && self.connections == other.connections && self.weight > other.weight)
         {
             return Ordering::Less;
         }
 
-        if self.connections == other.connections && self.weight == other.weight {
+        if self.healthy
+            && other.healthy
+            && self.connections == other.connections
+            && self.weight == other.weight
+        {
             return Ordering::Equal;
         }
 

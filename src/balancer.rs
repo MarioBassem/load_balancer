@@ -1,10 +1,9 @@
+use crate::balancer_service::DecrementSignal;
+use crate::health_check_service::{health_check_service, HealthCheckRequest, HealthReport};
 use crate::server::Server;
-use crate::{api_service, balancer_service};
+use crate::{api_service, balancer_service, health_check_service};
 use crossbeam_channel::{bounded, select, Receiver, Sender};
-use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, BodyStream};
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
 use hyper::StatusCode;
 use hyper::{
     body::{Body, Incoming},
@@ -14,12 +13,15 @@ use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use url::ParseError;
 
 pub struct Balancer {
     servers: HashMap<String, Server>,
+    unavailable_servers: HashMap<String, Server>,
     port: u16,
     api_port: u16,
 }
@@ -34,7 +36,6 @@ pub enum BalancerError {
 
 #[derive(Debug)]
 pub enum BalancerRequest {
-    DecrementServerConnections(String),
     AddServer(Server),
     DeleteServer(String),
     UpdateServer(Server),
@@ -51,6 +52,7 @@ pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer, B
         let map = Balancer::read_config_file(p)?;
         return Ok(Balancer {
             servers: map,
+            unavailable_servers: HashMap::new(),
             port,
             api_port,
         });
@@ -58,6 +60,7 @@ pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer, B
 
     return Ok(Balancer {
         servers: HashMap::new(),
+        unavailable_servers: HashMap::new(),
         port,
         api_port,
     });
@@ -105,19 +108,31 @@ impl Balancer {
             .map_err(|e| BalancerError::IO(e))?;
         log::info!("API Listening on http://{}", api_addr);
 
-        let (request_tx, request_rx) = bounded(0);
-        let (balancer_tx, worker_rx) = bounded(0);
-        let (api_tx, api_rx) = bounded(0);
-
+        let (balancer_request_tx, balancer_request_rx) = bounded(0);
+        let (balancer_response_tx, balancer_response_rx) = bounded(0);
         tokio::spawn(api_service::balancer_api_listener(
             api_listener,
-            request_tx.clone(),
-            api_rx.clone(),
+            balancer_request_tx,
+            balancer_response_rx,
         ));
+
+        let (decrement_sig_request_tx, decrement_sig_request_rx) = bounded(0);
+        let (decrement_sig_response_tx, decrement_sig_response_rx) = bounded(0);
         tokio::spawn(balancer_service::balancer_listener(
             listener,
-            request_tx.clone(),
-            worker_rx.clone(),
+            decrement_sig_request_tx,
+            decrement_sig_response_rx,
+        ));
+
+        let (health_check_request_tx, health_check_request_rx) = bounded(0);
+        let (health_report_tx, health_report_rx) = bounded(0);
+        tokio::spawn(health_check_service(
+            self.servers
+                .values()
+                .map(|v| (v.url.clone(), v.health_check_period))
+                .collect(),
+            health_report_tx,
+            health_check_request_rx,
         ));
 
         loop {
@@ -132,7 +147,21 @@ impl Balancer {
             };
 
             select! {
-                recv(request_rx) -> receive_result =>{
+                recv(decrement_sig_request_rx) -> receive_result =>{
+                    let req = match receive_result{
+                        Ok(req) => req,
+                        Err(error) =>{
+                            log::error!("failed to receive decrement connections signal: {}", error);
+                            continue;
+                        }
+                    };
+
+                    log::debug!("received decrement request: {:?}", req);
+                    if let Err(error) = self.decrement_server_connections(req.0){
+                        log::error!("failed to process decrement signal: {}", error);
+                    }
+                }
+                recv(balancer_request_rx) -> receive_result =>{
                     let req = match receive_result{
                         Ok(req) => req,
                         Err(error) => {
@@ -141,27 +170,31 @@ impl Balancer {
                         }
                     };
 
-                    log::debug!("got request: {:?}", req);
-                    let res = match req {
-                        BalancerRequest::DecrementServerConnections(url) => {
-                            self.decrement_server_connections(url)
-                        },
-                        BalancerRequest::AddServer(server) => {
-                            self.add_server(server)
-                        },
-                        BalancerRequest::DeleteServer(url) =>{
-                            self.delete_server(url)
-                        },
-                        BalancerRequest::UpdateServer(server) =>{
-                            self.modify_server(server)
-                        },
+                    log::debug!("received balancer request: {:?}", req);
+                    let response =  match self.process_balancer_request(req, health_check_request_tx.clone()){
+                        Ok(()) => BalancerResponse::Ok,
+                        Err(error) => error,
                     };
 
-                    if let Err(error) = res{
-                        log::error!("failed to perfrom request: {}", error)
+                    if let Err(error) = balancer_response_tx.send(response){
+                        log::error!("failed to send balancer responser: {}", error);
                     }
                 },
-                send(balancer_tx, next.clone()) -> send_result => {
+                recv(health_report_rx) -> receive_result =>{
+                    let report = match receive_result{
+                        Ok(report) => report,
+                        Err(error) =>{
+                            log::error!("failed to receive unhealthy server signal: {}", error);
+                            continue;
+                        }
+                    };
+
+                    log::debug!("received health report: {:?}", report);
+                    if let Err(error) = self.process_health_report(report){
+                        log::error!("failed to process health report: {}",  error);
+                    };
+                },
+                send(decrement_sig_response_tx, next.clone()) -> send_result => {
                     if let Err(error) = send_result{
                         log::error!("failed to send next server url signal: {}", error);
                     }
@@ -171,6 +204,49 @@ impl Balancer {
                     }
                 },
             };
+        }
+    }
+
+    fn process_balancer_request(
+        &mut self,
+        request: BalancerRequest,
+        health_check_request_tx: Sender<HealthCheckRequest>,
+    ) -> Result<(), BalancerResponse> {
+        match request {
+            BalancerRequest::AddServer(server) => {
+                let (url, period) = (server.url.clone(), server.health_check_period);
+                self.add_server(server)
+                    .map_err(|e| BalancerResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+                health_check_request_tx
+                    .send(HealthCheckRequest::Start(url, period))
+                    .map_err(|e| {
+                        BalancerResponse::Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                    })?;
+            }
+            BalancerRequest::DeleteServer(url) => {
+                self.delete_server(url.clone())
+                    .map_err(|e| BalancerResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+                health_check_request_tx
+                    .send(HealthCheckRequest::Stop(url))
+                    .map_err(|e| {
+                        BalancerResponse::Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                    })?;
+            }
+            BalancerRequest::UpdateServer(server) => {
+                self.modify_server(server)
+                    .map_err(|e| BalancerResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn process_health_report(&mut self, report: HealthReport) -> Result<(), BalancerError> {
+        match report {
+            HealthReport::Unhealhty(url) => self.update_server_health(&url, false),
+            HealthReport::Healthy(url) => self.update_server_health(&url, true),
         }
     }
 
@@ -207,9 +283,23 @@ impl Balancer {
         Ok(())
     }
 
-    fn modify_server(&mut self, server: Server) -> Result<(), BalancerError> {
+    fn modify_server(&mut self, new_server: Server) -> Result<(), BalancerError> {
         // prevent disabling all servers
-        todo!()
+        let cur_server = match self.servers.get_mut(&new_server.url) {
+            None => {
+                return Err(BalancerError::MyError(format!(
+                    "failed to find server with url {}",
+                    new_server.url
+                )))
+            }
+            Some(s) => s,
+        };
+
+        cur_server.name = new_server.name;
+        cur_server.health_check_period = new_server.health_check_period;
+        cur_server.weight = new_server.weight;
+
+        Ok(())
     }
 
     fn choose_next_server(&self) -> Result<String, BalancerError> {
@@ -260,11 +350,22 @@ impl Balancer {
 
         Ok(())
     }
+
+    fn update_server_health(&mut self, url: &str, healthy: bool) -> Result<(), BalancerError> {
+        let server = self
+            .servers
+            .get_mut(url)
+            .ok_or(BalancerError::MyError(format!("server {} not found", url)))?;
+
+        server.healthy = healthy;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use std::{collections::HashMap, os::unix::net::SocketAddr};
+    use std::collections::HashMap;
 
     use crate::server::Server;
 
@@ -275,13 +376,11 @@ mod test {
         let text = "
 - name: server1
   url: http://127.0.0.1:3001
-  disabled: false
   weight: 1
   health_check_period: 5
 
 - name: server2
   url: http://127.0.0.1:3002
-  disabled: TRUE
   weight: 2
   health_check_period: 7
         ";
@@ -293,7 +392,6 @@ mod test {
                 Server {
                     url: "http://127.0.0.1:3001".to_string(),
                     connections: 0,
-                    disabled: false,
                     name: "server1".to_string(),
                     weight: 1,
                     health_check_period: 5,
@@ -305,7 +403,6 @@ mod test {
                 Server {
                     url: "http://127.0.0.1:3002".to_string(),
                     connections: 0,
-                    disabled: true,
                     name: "server2".to_string(),
                     weight: 2,
                     health_check_period: 7,

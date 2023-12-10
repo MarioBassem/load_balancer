@@ -14,9 +14,12 @@ use hyper::{
 
 use crate::balancer::{BalancerError, BalancerRequest, BalancerResponse};
 
+#[derive(Debug)]
+pub(crate) struct DecrementSignal(pub String);
+
 pub(crate) async fn balancer_listener(
     listener: TcpListener,
-    tx: Sender<BalancerRequest>,
+    tx: Sender<DecrementSignal>,
     rx: Receiver<String>,
 ) {
     loop {
@@ -49,7 +52,7 @@ pub(crate) async fn balancer_listener(
                 log::error!("Failed to serve connection: {:?}", err);
             }
 
-            if let Err(error) = tx.send(BalancerRequest::DecrementServerConnections(address)) {
+            if let Err(error) = tx.send(DecrementSignal(address)) {
                 log::error!(
                     "failed to send decrement server connections signal: {}",
                     error
