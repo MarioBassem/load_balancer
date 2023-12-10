@@ -4,7 +4,8 @@ use serde_json;
 use std::{future::Future, pin::Pin};
 use tokio::net::{TcpListener, TcpStream};
 
-use crossbeam_channel::{Receiver, Sender};
+// use crossbeam_channel::{Receiver, Sender};
+use async_channel::{Receiver, Sender};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{
@@ -52,20 +53,20 @@ async fn process_request(
             let server: Server =
                 serde_json::from_slice(&body.iter().cloned().collect::<Vec<u8>>())?;
 
-            tx.send(BalancerRequest::AddServer(server))?;
+            tx.send(BalancerRequest::AddServer(server)).await?;
         }
         (&hyper::Method::POST, "/delete") => {
             let body = req.collect().await?.to_bytes();
             let url = String::from_utf8(body.iter().cloned().collect::<Vec<u8>>())?;
 
-            tx.send(BalancerRequest::DeleteServer(url))?;
+            tx.send(BalancerRequest::DeleteServer(url)).await?;
         }
         (&hyper::Method::POST, "/update") => {
             let body = req.collect().await?.to_bytes();
             let server: Server =
                 serde_json::from_slice(&body.iter().cloned().collect::<Vec<u8>>())?;
 
-            tx.send(BalancerRequest::UpdateServer(server))?;
+            tx.send(BalancerRequest::UpdateServer(server)).await?;
         }
         (_, _) => {
             return Ok(Response::builder()
@@ -75,7 +76,7 @@ async fn process_request(
         }
     };
 
-    let resp = match rx.recv() {
+    let resp = match rx.recv().await {
         Ok(BalancerResponse::Ok) => Response::builder()
             .status(hyper::StatusCode::OK)
             .body("".to_string())

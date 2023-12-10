@@ -1,7 +1,8 @@
 use crate::health_check_service::{health_check_service, HealthCheckRequest, HealthReport};
 use crate::server::Server;
 use crate::{api_service, balancer_service};
-use crossbeam_channel::{bounded, select, Sender};
+// use crossbeam_channel::{bounded, select, Sender};
+use async_channel::{bounded, Receiver, Sender};
 use hyper::StatusCode;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -94,24 +95,24 @@ impl Balancer {
             .map_err(|e| BalancerError::IO(e))?;
         log::info!("API Listening on http://{}", api_addr);
 
-        let (balancer_request_tx, balancer_request_rx) = bounded(0);
-        let (balancer_response_tx, balancer_response_rx) = bounded(0);
+        let (balancer_request_tx, balancer_request_rx) = bounded(1);
+        let (balancer_response_tx, balancer_response_rx) = bounded(1);
         tokio::spawn(api_service::balancer_api_listener(
             api_listener,
             balancer_request_tx,
             balancer_response_rx,
         ));
 
-        let (decrement_sig_request_tx, decrement_sig_request_rx) = bounded(0);
-        let (next_server_tx, next_server_rx) = bounded(0);
+        let (decrement_sig_request_tx, decrement_sig_request_rx) = bounded(1);
+        let (next_server_tx, next_server_rx) = bounded(1);
         tokio::spawn(balancer_service::balancer_listener(
             listener,
             decrement_sig_request_tx,
             next_server_rx,
         ));
 
-        let (health_check_request_tx, health_check_request_rx) = bounded(0);
-        let (health_report_tx, health_report_rx) = bounded(0);
+        let (health_check_request_tx, health_check_request_rx) = bounded(1);
+        let (health_report_tx, health_report_rx) = bounded(1);
         tokio::spawn(health_check_service(
             self.servers
                 .values()
@@ -132,8 +133,8 @@ impl Balancer {
                 }
             };
 
-            select! {
-                recv(decrement_sig_request_rx) -> receive_result =>{
+            tokio::select! {
+                  receive_result = decrement_sig_request_rx.recv() =>{
                     let req = match receive_result{
                         Ok(req) => req,
                         Err(error) =>{
@@ -147,7 +148,7 @@ impl Balancer {
                         log::error!("failed to process decrement signal: {}", error);
                     }
                 }
-                recv(balancer_request_rx) -> receive_result =>{
+                 receive_result = balancer_request_rx.recv() =>{
                     let req = match receive_result{
                         Ok(req) => req,
                         Err(error) => {
@@ -157,17 +158,17 @@ impl Balancer {
                     };
 
                     log::debug!("received balancer request: {:?}", req);
-                    let response =  match self.process_balancer_request(req, health_check_request_tx.clone()){
+                    let response =  match self.process_balancer_request(req, health_check_request_tx.clone()).await{
                         Ok(()) => BalancerResponse::Ok,
                         Err(error) => error,
                     };
                     log::debug!("sending balancer response: {:?}", response);
 
-                    if let Err(error) = balancer_response_tx.send(response){
+                    if let Err(error) = balancer_response_tx.send(response).await{
                         log::error!("failed to send balancer responser: {}", error);
                     }
                 },
-                recv(health_report_rx) -> receive_result =>{
+                 receive_result = health_report_rx.recv() =>{
                     let report = match receive_result{
                         Ok(report) => report,
                         Err(error) =>{
@@ -181,7 +182,7 @@ impl Balancer {
                         log::error!("failed to process health report: {}",  error);
                     };
                 },
-                send(next_server_tx, next.clone()) -> send_result => {
+                send_result = next_server_tx.send(next.clone())=> {
                     if let Err(error) = send_result{
                         log::error!("failed to send next server url signal: {}", error);
                     }
@@ -194,7 +195,7 @@ impl Balancer {
         }
     }
 
-    fn process_balancer_request(
+    async fn process_balancer_request(
         &mut self,
         request: BalancerRequest,
         health_check_request_tx: Sender<HealthCheckRequest>,
@@ -209,6 +210,7 @@ impl Balancer {
                 log::debug!("sending add server to worker");
                 health_check_request_tx
                     .send(HealthCheckRequest::Start(url, period))
+                    .await
                     .map_err(|e| {
                         BalancerResponse::Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
                     })?;
@@ -219,6 +221,7 @@ impl Balancer {
 
                 health_check_request_tx
                     .send(HealthCheckRequest::Stop(url))
+                    .await
                     .map_err(|e| {
                         BalancerResponse::Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
                     })?;

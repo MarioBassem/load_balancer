@@ -1,4 +1,5 @@
-use crossbeam_channel::{select, Receiver, Sender};
+// use crossbeam_channel::{select, Receiver, Sender};
+use async_channel::{bounded, Receiver, Sender};
 use reqwest::StatusCode;
 use std::{
     collections::{HashMap, HashSet},
@@ -29,13 +30,13 @@ pub(crate) async fn health_check_service(
     log::debug!("health check service started...");
     let mut map = HashMap::new();
     for (url, period) in servers {
-        let (mytx, myrx) = crossbeam_channel::bounded(0);
+        let (mytx, myrx) = bounded(1);
         map.insert(url.clone(), mytx);
-        let _ = tokio::spawn(health_check(url, period, tx.clone(), myrx)).await;
+        let _ = tokio::spawn(health_check(url, period, tx.clone(), myrx));
     }
 
     loop {
-        let req = match rx.recv() {
+        let req = match rx.recv().await {
             Ok(req) => req,
             Err(error) => {
                 log::error!("health check service failed to receive signal: {}", error);
@@ -45,7 +46,7 @@ pub(crate) async fn health_check_service(
 
         match req {
             HealthCheckRequest::Start(url, period) => {
-                let (mytx, myrx) = crossbeam_channel::bounded(0);
+                let (mytx, myrx) = bounded(1);
                 map.insert(url.clone(), mytx);
                 let _ = tokio::spawn(health_check(url, period, tx.clone(), myrx)).await;
             }
@@ -58,7 +59,7 @@ pub(crate) async fn health_check_service(
                     }
                 };
 
-                if let Err(error) = worker_sender.send(()) {
+                if let Err(error) = worker_sender.send(()).await {
                     log::error!(
                         "failed to send stop signal to {} health check worker: {}",
                         url,
@@ -71,6 +72,7 @@ pub(crate) async fn health_check_service(
 }
 
 async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Receiver<()>) {
+    let url_clone = url.clone();
     let handler = tokio::spawn(async move {
         loop {
             sleep(Duration::from_secs(period)).await;
@@ -92,7 +94,7 @@ async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Re
                     status
                 );
 
-                if let Err(error) = tx.send(HealthReport::Unhealhty(url.clone())) {
+                if let Err(error) = tx.send(HealthReport::Unhealhty(url.clone())).await {
                     log::error!(
                         "failed to send {} health check failure signal to balancer: {}",
                         url,
@@ -102,7 +104,7 @@ async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Re
             } else {
                 log::debug!("server {} is healthy", url);
 
-                if let Err(error) = tx.send(HealthReport::Healthy(url.clone())) {
+                if let Err(error) = tx.send(HealthReport::Healthy(url.clone())).await {
                     log::error!(
                         "failed to send {} health check failure signal to balancer: {}",
                         url,
@@ -113,24 +115,22 @@ async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Re
         }
     });
 
-    tokio::spawn(async move {
-        loop {
-            log::debug!("waiting for health check kill sig");
-            select! {
-                recv(rx) -> receive_result =>{
-                    match receive_result{
-                        Ok(()) => (),
-                        Err(error) => {
-                            log::error!("health check worker failed to receive signal: {}", error);
-                            continue;
-                        }
-                    };
+    loop {
+        log::debug!("waiting for health check kill sig for server {}", url_clone);
+        tokio::select! {
+            receive_result = rx.recv() =>{
+                match receive_result{
+                    Ok(()) => (),
+                    Err(error) => {
+                        log::error!("health check worker failed to receive signal: {}", error);
+                        continue;
+                    }
+                };
 
-                    log::debug!("killing health check for ");
-                    handler.abort();
-                    return;
-                }
+                log::debug!("killing health check for ");
+                handler.abort();
+                return;
             }
         }
-    });
+    }
 }

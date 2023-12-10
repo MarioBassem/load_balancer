@@ -3,7 +3,7 @@ use serde_json;
 use std::{future::Future, pin::Pin};
 use tokio::net::{TcpListener, TcpStream};
 
-use crossbeam_channel::{Receiver, Sender};
+use async_channel::{Receiver, Sender};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{
@@ -37,7 +37,7 @@ pub(crate) async fn balancer_listener(
 
         tokio::spawn(async move {
             // wait for balancer to send url
-            let url: String = match rx.recv() {
+            let url: String = match rx.recv().await {
                 Ok(s) => s,
                 Err(error) => {
                     log::error!("failed to receive server url from balancer: {}", error);
@@ -52,7 +52,7 @@ pub(crate) async fn balancer_listener(
                 log::error!("Failed to serve connection: {:?}", err);
             }
 
-            if let Err(error) = tx.send(DecrementSignal(address)) {
+            if let Err(error) = tx.send(DecrementSignal(address)).await {
                 log::error!(
                     "failed to send decrement server connections signal: {}",
                     error
