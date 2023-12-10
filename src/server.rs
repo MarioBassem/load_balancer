@@ -35,6 +35,6 @@ impl Ord for Server {
 }
 impl PartialOrd for Server {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.connections.partial_cmp(&other.connections)
+        Some(self.cmp(other))
     }
 }

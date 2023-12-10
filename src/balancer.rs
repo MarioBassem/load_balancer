@@ -1,27 +1,15 @@
-use crate::balancer_service::DecrementSignal;
 use crate::health_check_service::{health_check_service, HealthCheckRequest, HealthReport};
 use crate::server::Server;
-use crate::{api_service, balancer_service, health_check_service};
-use crossbeam_channel::{bounded, select, Receiver, Sender};
-use http_body_util::{BodyExt, BodyStream};
+use crate::{api_service, balancer_service};
+use crossbeam_channel::{bounded, select, Sender};
 use hyper::StatusCode;
-use hyper::{
-    body::{Body, Incoming},
-    Request, Response,
-};
-use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use url::ParseError;
 
 pub struct Balancer {
     servers: HashMap<String, Server>,
-    unavailable_servers: HashMap<String, Server>,
     port: u16,
     api_port: u16,
 }
@@ -52,7 +40,6 @@ pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer, B
         let map = Balancer::read_config_file(p)?;
         return Ok(Balancer {
             servers: map,
-            unavailable_servers: HashMap::new(),
             port,
             api_port,
         });
@@ -60,7 +47,6 @@ pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer, B
 
     return Ok(Balancer {
         servers: HashMap::new(),
-        unavailable_servers: HashMap::new(),
         port,
         api_port,
     });
@@ -117,11 +103,11 @@ impl Balancer {
         ));
 
         let (decrement_sig_request_tx, decrement_sig_request_rx) = bounded(0);
-        let (decrement_sig_response_tx, decrement_sig_response_rx) = bounded(0);
+        let (next_server_tx, next_server_rx) = bounded(0);
         tokio::spawn(balancer_service::balancer_listener(
             listener,
             decrement_sig_request_tx,
-            decrement_sig_response_rx,
+            next_server_rx,
         ));
 
         let (health_check_request_tx, health_check_request_rx) = bounded(0);
@@ -175,6 +161,7 @@ impl Balancer {
                         Ok(()) => BalancerResponse::Ok,
                         Err(error) => error,
                     };
+                    log::debug!("sending balancer response: {:?}", response);
 
                     if let Err(error) = balancer_response_tx.send(response){
                         log::error!("failed to send balancer responser: {}", error);
@@ -194,7 +181,7 @@ impl Balancer {
                         log::error!("failed to process health report: {}",  error);
                     };
                 },
-                send(decrement_sig_response_tx, next.clone()) -> send_result => {
+                send(next_server_tx, next.clone()) -> send_result => {
                     if let Err(error) = send_result{
                         log::error!("failed to send next server url signal: {}", error);
                     }
@@ -214,10 +201,12 @@ impl Balancer {
     ) -> Result<(), BalancerResponse> {
         match request {
             BalancerRequest::AddServer(server) => {
+                log::debug!("balancer trying to add server: {:?}", server);
                 let (url, period) = (server.url.clone(), server.health_check_period);
                 self.add_server(server)
                     .map_err(|e| BalancerResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
+                log::debug!("sending add server to worker");
                 health_check_request_tx
                     .send(HealthCheckRequest::Start(url, period))
                     .map_err(|e| {
@@ -251,7 +240,9 @@ impl Balancer {
     }
 
     fn add_server(&mut self, server: Server) -> Result<(), BalancerError> {
+        log::debug!("add_server");
         if self.servers.contains_key(&server.url) {
+            log::debug!("contains key");
             return Err(BalancerError::MyError(format!(
                 "a server with url {} already exists",
                 server.url

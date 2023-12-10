@@ -25,7 +25,21 @@ struct Params {
 
 impl Display for BalancerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Balancer Error: {}", self)
+        match self {
+            BalancerError::ConfigError(s) => {
+                write!(f, "Config Error: {}", s)?;
+            }
+            BalancerError::IO(s) => {
+                write!(f, "IO Error: {}", s)?;
+            }
+            BalancerError::MyError(s) => {
+                write!(f, "Balancer Error: {}", s)?;
+            }
+            BalancerError::ParseError(s) => {
+                write!(f, "Parsing Error: {}", s)?;
+            }
+        }
+        Ok(())
     }
 }
 

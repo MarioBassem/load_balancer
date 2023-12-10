@@ -31,7 +31,7 @@ pub(crate) async fn health_check_service(
     for (url, period) in servers {
         let (mytx, myrx) = crossbeam_channel::bounded(0);
         map.insert(url.clone(), mytx);
-        tokio::spawn(health_check(url, period, tx.clone(), myrx));
+        let _ = tokio::spawn(health_check(url, period, tx.clone(), myrx)).await;
     }
 
     loop {
@@ -47,7 +47,7 @@ pub(crate) async fn health_check_service(
             HealthCheckRequest::Start(url, period) => {
                 let (mytx, myrx) = crossbeam_channel::bounded(0);
                 map.insert(url.clone(), mytx);
-                tokio::spawn(health_check(url, period, tx.clone(), myrx));
+                let _ = tokio::spawn(health_check(url, period, tx.clone(), myrx)).await;
             }
             HealthCheckRequest::Stop(url) => {
                 let worker_sender = match map.remove(&url) {
@@ -73,6 +73,8 @@ pub(crate) async fn health_check_service(
 async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Receiver<()>) {
     let handler = tokio::spawn(async move {
         loop {
+            sleep(Duration::from_secs(period)).await;
+
             log::debug!("health check for url: {}", url);
             let req = match reqwest::get(url.clone()).await {
                 Ok(req) => req,
@@ -108,27 +110,27 @@ async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Re
                     );
                 }
             }
-
-            sleep(Duration::from_secs(period)).await;
         }
     });
 
-    loop {
-        log::debug!("waiting for health check kill sig");
-        select! {
-            recv(rx) -> receive_result =>{
-                match receive_result{
-                    Ok(()) => (),
-                    Err(error) => {
-                        log::error!("health check worker failed to receive signal: {}", error);
-                        continue;
-                    }
-                };
+    tokio::spawn(async move {
+        loop {
+            log::debug!("waiting for health check kill sig");
+            select! {
+                recv(rx) -> receive_result =>{
+                    match receive_result{
+                        Ok(()) => (),
+                        Err(error) => {
+                            log::error!("health check worker failed to receive signal: {}", error);
+                            continue;
+                        }
+                    };
 
-                log::debug!("killing health check for ");
-                handler.abort();
-                return;
+                    log::debug!("killing health check for ");
+                    handler.abort();
+                    return;
+                }
             }
         }
-    }
+    });
 }
