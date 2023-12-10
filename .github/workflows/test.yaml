@@ -1,0 +1,22 @@
+name: Rust
+
+on: [push]
+
+jobs:
+  build:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        name: Checkout code
+        with:
+          fetch-depth: 1
+      - uses: actions-rs/toolchain@v1
+        name: Install toolchain
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-musl
+      - uses: actions-rs/cargo@v1
+        name: Run tests
+        with:
+          command: test
