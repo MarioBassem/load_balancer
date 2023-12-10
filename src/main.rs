@@ -4,7 +4,7 @@ mod balancer_service;
 mod health_check_service;
 mod server;
 
-use balancer::BalancerError;
+use balancer::{Balancer, BalancerError};
 use clap::Parser;
 use std::fmt::Display;
 
@@ -23,28 +23,8 @@ struct Params {
     debug: bool,
 }
 
-impl Display for BalancerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BalancerError::ConfigError(s) => {
-                write!(f, "Config Error: {}", s)?;
-            }
-            BalancerError::IO(s) => {
-                write!(f, "IO Error: {}", s)?;
-            }
-            BalancerError::MyError(s) => {
-                write!(f, "Balancer Error: {}", s)?;
-            }
-            BalancerError::ParseError(s) => {
-                write!(f, "Parsing Error: {}", s)?;
-            }
-        }
-        Ok(())
-    }
-}
-
 async fn app(params: Params) -> Result<(), BalancerError> {
-    let mut balancer = balancer::new(params.config, params.port, params.api_port)?;
+    let mut balancer = Balancer::new(params.config, params.port, params.api_port)?;
     balancer.listen().await?;
 
     Ok(())

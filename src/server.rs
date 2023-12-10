@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 #[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
-pub struct Server {
+pub(crate) struct Server {
     pub url: String,
     pub name: String,
     pub weight: u32,

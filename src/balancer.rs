@@ -4,6 +4,7 @@ use crate::{api_service, balancer_service};
 use async_channel::{bounded, Sender};
 use hyper::StatusCode;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use url::ParseError;
@@ -22,6 +23,26 @@ pub enum BalancerError {
     ParseError(ParseError),
 }
 
+impl Display for BalancerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BalancerError::ConfigError(s) => {
+                write!(f, "Config Error: {}", s)?;
+            }
+            BalancerError::IO(s) => {
+                write!(f, "IO Error: {}", s)?;
+            }
+            BalancerError::MyError(s) => {
+                write!(f, "Balancer Error: {}", s)?;
+            }
+            BalancerError::ParseError(s) => {
+                write!(f, "Parsing Error: {}", s)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub enum BalancerRequest {
     AddServer(Server),
@@ -35,24 +56,24 @@ pub enum BalancerResponse {
     Error(StatusCode, String), // status code, error message
 }
 
-pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer, BalancerError> {
-    if let Some(p) = path {
-        let map = Balancer::read_config_file(p)?;
-        return Ok(Balancer {
-            servers: map,
+impl Balancer {
+    pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer, BalancerError> {
+        if let Some(p) = path {
+            let map = Balancer::read_config_file(p)?;
+            return Ok(Balancer {
+                servers: map,
+                port,
+                api_port,
+            });
+        }
+
+        Ok(Balancer {
+            servers: HashMap::new(),
             port,
             api_port,
-        });
+        })
     }
 
-    Ok(Balancer {
-        servers: HashMap::new(),
-        port,
-        api_port,
-    })
-}
-
-impl Balancer {
     fn read_config_file(path: String) -> Result<HashMap<String, Server>, BalancerError> {
         let f = std::fs::File::open(path).map_err(BalancerError::IO)?;
         let map = Balancer::get_servers(f)?;
@@ -357,7 +378,9 @@ impl Balancer {
 mod test {
     use std::collections::HashMap;
 
-    use crate::server::Server;
+    use async_channel::bounded;
+
+    use crate::{health_check_service::HealthCheckRequest, server::Server};
 
     use super::Balancer;
 
@@ -402,5 +425,163 @@ mod test {
         ]);
 
         assert_eq!(got, want)
+    }
+
+    #[test]
+    fn new_empty_balancer() {
+        let balancer = Balancer::new(None, 3000, 3001).unwrap();
+        assert_eq!(balancer.port, 3000);
+        assert_eq!(balancer.api_port, 3001);
+        assert_eq!(balancer.servers, HashMap::new());
+    }
+
+    #[test]
+    fn new_balancer() {
+        let balancer = Balancer::new(Some("config.yaml".to_string()), 3000, 5000).unwrap();
+        assert_eq!(balancer.port, 3000);
+        assert_eq!(balancer.api_port, 5000);
+        assert_eq!(
+            balancer.servers,
+            HashMap::from([
+                (
+                    "http://127.0.0.1:3001".to_string(),
+                    Server {
+                        url: "http://127.0.0.1:3001".to_string(),
+                        connections: 0,
+                        name: "server1".to_string(),
+                        weight: 1,
+                        health_check_period: 5,
+                        healthy: false,
+                    },
+                ),
+                (
+                    "http://127.0.0.1:3002".to_string(),
+                    Server {
+                        url: "http://127.0.0.1:3002".to_string(),
+                        connections: 0,
+                        name: "server2".to_string(),
+                        weight: 2,
+                        health_check_period: 7,
+                        healthy: false,
+                    },
+                ),
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_process_balancer_request_add() {
+        let mut balancer = Balancer::new(Some("config.yaml".to_string()), 3000, 3001).unwrap();
+        let (tx, rx) = bounded(1);
+        let url = "http://128.1.1.3:4000".to_string();
+        let url_clone = url.clone();
+        let request = crate::balancer::BalancerRequest::AddServer(Server {
+            url: url.clone(),
+            name: "server3".to_string(),
+            weight: 5,
+            health_check_period: 9,
+            connections: 0,
+            healthy: false,
+        });
+
+        let rx_clone = rx.clone();
+        tokio::spawn(async move {
+            let sig = rx_clone.recv().await.unwrap();
+            match sig {
+                HealthCheckRequest::Start(u, period) => {
+                    assert_eq!(u, url.clone());
+                    assert_eq!(period, 9);
+                }
+                _ => {
+                    panic!(
+                        "balancer did not send a health check start request, but sent {:?}",
+                        sig
+                    );
+                }
+            }
+        });
+
+        balancer
+            .process_balancer_request(request, tx.clone())
+            .await
+            .unwrap();
+
+        assert!(
+            balancer.servers.get(&url_clone).unwrap()
+                == &Server {
+                    url: url_clone,
+                    name: "server3".to_string(),
+                    weight: 5,
+                    health_check_period: 9,
+                    connections: 0,
+                    healthy: false,
+                }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_process_balancer_request_delete() {
+        let mut balancer = Balancer::new(Some("config.yaml".to_string()), 3000, 3001).unwrap();
+        let (tx, rx) = bounded(1);
+        let url = "http://127.0.0.1:3001".to_string();
+        let url_clone = url.clone();
+        let request = crate::balancer::BalancerRequest::DeleteServer(url.clone());
+
+        let rx_clone = rx.clone();
+        tokio::spawn(async move {
+            let sig = rx_clone.recv().await.unwrap();
+            match sig {
+                HealthCheckRequest::Stop(u) => {
+                    assert_eq!(u, url.clone());
+                }
+                _ => {
+                    panic!(
+                        "balancer did not send a health check start request, but sent {:?}",
+                        sig
+                    );
+                }
+            }
+        });
+
+        balancer
+            .process_balancer_request(request, tx.clone())
+            .await
+            .unwrap();
+
+        assert!(!balancer.servers.contains_key(&url_clone));
+        assert_eq!(balancer.servers.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_process_balancer_request_update() {
+        let mut balancer = Balancer::new(Some("config.yaml".to_string()), 3000, 3001).unwrap();
+        let (tx, _) = bounded(1);
+        let url = "http://127.0.0.1:3001".to_string();
+        let request = crate::balancer::BalancerRequest::UpdateServer(Server {
+            url: url.clone(),
+            name: "server4".to_string(),
+            weight: 10,
+            health_check_period: 20,
+            connections: 10,
+            healthy: true,
+        });
+
+        balancer
+            .process_balancer_request(request, tx.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(balancer.servers.len(), 2);
+        assert_eq!(
+            balancer.servers.get(&url).unwrap(),
+            &Server {
+                url: url.clone(),
+                name: "server4".to_string(),
+                weight: 10,
+                health_check_period: 20,
+                connections: 0,
+                healthy: false,
+            }
+        );
     }
 }

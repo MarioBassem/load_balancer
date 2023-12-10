@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 
 // used to start/stop health check workers
+#[derive(Debug)]
 pub(crate) enum HealthCheckRequest {
     Stop(String),
     Start(String, u64),
