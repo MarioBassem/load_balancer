@@ -1,13 +1,6 @@
-// use crossbeam_channel::{select, Receiver, Sender};
 use async_channel::{bounded, Receiver, Sender};
-use reqwest::StatusCode;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
-
-use crate::server::Server;
 
 // used to start/stop health check workers
 pub(crate) enum HealthCheckRequest {
@@ -32,7 +25,7 @@ pub(crate) async fn health_check_service(
     for (url, period) in servers {
         let (mytx, myrx) = bounded(1);
         map.insert(url.clone(), mytx);
-        let _ = tokio::spawn(health_check(url, period, tx.clone(), myrx));
+        tokio::spawn(health_check(url, period, tx.clone(), myrx));
     }
 
     loop {
@@ -87,7 +80,7 @@ async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Re
             };
 
             let status = req.status().as_u16();
-            if status < 200 || status >= 400 {
+            if !(200..400).contains(&status) {
                 log::debug!(
                     "server {} failed health check with status code {}",
                     url,

@@ -1,20 +1,12 @@
-use http_body_util::BodyExt;
-use hyper_util::rt::TokioIo;
-use serde_json;
-use std::{future::Future, pin::Pin};
-use tokio::net::{TcpListener, TcpStream};
-
-// use crossbeam_channel::{Receiver, Sender};
 use async_channel::{Receiver, Sender};
+use http_body_util::BodyExt;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{
-    body::{Body, Incoming},
-    service::Service,
-    Request, Response,
-};
+use hyper::{body::Incoming, Request, Response};
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpListener;
 
-use crate::balancer::{BalancerError, BalancerRequest, BalancerResponse};
+use crate::balancer::{BalancerRequest, BalancerResponse};
 use crate::server::Server;
 
 pub(crate) async fn balancer_api_listener(
@@ -90,5 +82,5 @@ async fn process_request(
             .unwrap(),
     };
 
-    return Ok(resp);
+    Ok(resp)
 }

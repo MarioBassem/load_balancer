@@ -30,7 +30,7 @@ impl Ord for Server {
             return Ordering::Equal;
         }
 
-        return Ordering::Greater;
+        Ordering::Greater
     }
 }
 impl PartialOrd for Server {

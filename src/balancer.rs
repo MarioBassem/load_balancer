@@ -1,8 +1,7 @@
 use crate::health_check_service::{health_check_service, HealthCheckRequest, HealthReport};
 use crate::server::Server;
 use crate::{api_service, balancer_service};
-// use crossbeam_channel::{bounded, select, Sender};
-use async_channel::{bounded, Receiver, Sender};
+use async_channel::{bounded, Sender};
 use hyper::StatusCode;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -46,24 +45,23 @@ pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer, B
         });
     }
 
-    return Ok(Balancer {
+    Ok(Balancer {
         servers: HashMap::new(),
         port,
         api_port,
-    });
+    })
 }
 
 impl Balancer {
     fn read_config_file(path: String) -> Result<HashMap<String, Server>, BalancerError> {
-        let f = std::fs::File::open(path).map_err(|error| BalancerError::IO(error))?;
+        let f = std::fs::File::open(path).map_err(BalancerError::IO)?;
         let map = Balancer::get_servers(f)?;
 
-        return Ok(map);
+        Ok(map)
     }
 
     fn get_servers<R: std::io::Read>(r: R) -> Result<HashMap<String, Server>, BalancerError> {
-        let d: Vec<Server> =
-            serde_yaml::from_reader(r).map_err(|error| BalancerError::ConfigError(error))?;
+        let d: Vec<Server> = serde_yaml::from_reader(r).map_err(BalancerError::ConfigError)?;
         let map: Result<HashMap<String, Server>, BalancerError> = d
             .into_iter()
             .map(|v| {
@@ -74,7 +72,7 @@ impl Balancer {
             })
             .collect();
 
-        return Ok(map?);
+        map
     }
 
     pub async fn listen(&mut self) -> Result<(), BalancerError> {
@@ -84,15 +82,13 @@ impl Balancer {
         // balancer updates chosen server status
         let addr: SocketAddr = ([127, 0, 0, 1], self.port).into();
 
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| BalancerError::IO(e))?;
+        let listener = TcpListener::bind(addr).await.map_err(BalancerError::IO)?;
         log::info!("Listening on http://{}", addr);
 
         let api_addr: SocketAddr = ([127, 0, 0, 1], self.api_port).into();
         let api_listener = TcpListener::bind(api_addr)
             .await
-            .map_err(|e| BalancerError::IO(e))?;
+            .map_err(BalancerError::IO)?;
         log::info!("API Listening on http://{}", api_addr);
 
         let (balancer_request_tx, balancer_request_rx) = bounded(1);
@@ -302,13 +298,13 @@ impl Balancer {
         let server = match least_connections_server {
             Some(server) => server,
             None => {
-                return Err(BalancerError::MyError(format!(
-                    "balancer has 0 working servers"
-                )))
+                return Err(BalancerError::MyError(
+                    "balancer has 0 working servers".to_string(),
+                ))
             }
         };
 
-        return Ok(server.url.clone());
+        Ok(server.url.clone())
     }
 
     fn increment_server_connections(&mut self, url: String) -> Result<(), BalancerError> {

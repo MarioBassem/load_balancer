@@ -1,18 +1,9 @@
-use hyper_util::rt::TokioIo;
-use serde_json;
-use std::{future::Future, pin::Pin};
-use tokio::net::{TcpListener, TcpStream};
-
 use async_channel::{Receiver, Sender};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{
-    body::{Body, Incoming},
-    service::Service,
-    Request, Response,
-};
-
-use crate::balancer::{BalancerError, BalancerRequest, BalancerResponse};
+use hyper::{body::Incoming, Request, Response};
+use hyper_util::rt::TokioIo;
+use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Debug)]
 pub(crate) struct DecrementSignal(pub String);
@@ -82,5 +73,5 @@ async fn delegate(
 
     let res = sender.send_request(req).await?;
 
-    return Ok(res);
+    Ok(res)
 }
