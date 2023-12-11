@@ -1,0 +1,11 @@
+- name: server1
+  url: http://127.0.0.1:3001
+  disabled: false
+  weight: 1
+  health_check_period: 5
+
+- name: server2
+  url: http://127.0.0.1:3002
+  disabled: TRUE
+  weight: 2
+  health_check_period: 7
