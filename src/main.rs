@@ -9,7 +9,7 @@ use anyhow::Result;
 use api_cli::{add_server, delete_server, update_server, ServerConfigs, ServerURL};
 use balancer::Balancer;
 use clap::Parser;
-use clap::{Args, Subcommand};
+use clap::Subcommand;
 #[derive(Parser, Debug)]
 struct BalancerParams {
     /// Config yaml file path for servers configurations
@@ -57,11 +57,6 @@ enum Commands {
     AddServer(ServerConfigs),
     DeleteServer(ServerURL),
     UpdateServer(ServerConfigs),
-}
-
-#[derive(Args)]
-struct AddArgs {
-    name: Option<String>,
 }
 
 #[tokio::main]
