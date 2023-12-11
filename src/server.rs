@@ -16,8 +16,9 @@ pub(crate) struct Server {
 
 impl Ord for Server {
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.healthy && self.connections < other.connections
-            || (self.healthy && self.connections == other.connections && self.weight > other.weight)
+        if (self.healthy && !other.healthy)
+            || (self.healthy && (self.connections < other.connections)
+                || (self.connections == other.connections && self.weight > other.weight))
         {
             return Ordering::Less;
         }
