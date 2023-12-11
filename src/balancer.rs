@@ -538,8 +538,9 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_process_balancer_request_update() {
         let mut balancer = Balancer::new(Some("config.yaml".to_string()), 3000, 3001).unwrap();
-        let (tx, _) = bounded(1);
+        let (tx, rx) = bounded(1);
         let url = "http://127.0.0.1:3001".to_string();
+        let url_clone = url.clone();
         let request = crate::balancer::APIRequest::UpdateServer(Server {
             url: url.clone(),
             name: "server4".to_string(),
@@ -549,6 +550,35 @@ mod test {
             healthy: true,
         });
 
+        let rx_clone = rx.clone();
+        tokio::spawn(async move {
+            let sig = rx_clone.recv().await.unwrap();
+            match sig {
+                HealthCheckRequest::Stop(u) => {
+                    assert_eq!(u, url.clone());
+                }
+                _ => {
+                    panic!(
+                        "balancer did not send a health check start request, but sent {:?}",
+                        sig
+                    );
+                }
+            }
+
+            let sig = rx_clone.recv().await.unwrap();
+            match sig {
+                HealthCheckRequest::Start(u, 20) => {
+                    assert_eq!(u, url.clone());
+                }
+                _ => {
+                    panic!(
+                        "balancer did not send a health check start request, but sent {:?}",
+                        sig
+                    );
+                }
+            }
+        });
+
         balancer
             .process_balancer_request(request, tx.clone())
             .await
@@ -556,9 +586,9 @@ mod test {
 
         assert_eq!(balancer.servers.len(), 2);
         assert_eq!(
-            balancer.servers.get(&url).unwrap(),
+            balancer.servers.get(&url_clone).unwrap(),
             &Server {
-                url: url.clone(),
+                url: url_clone.clone(),
                 name: "server4".to_string(),
                 weight: 10,
                 health_check_period: 20,
