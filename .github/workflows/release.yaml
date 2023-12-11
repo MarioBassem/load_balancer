@@ -9,6 +9,8 @@ jobs:
   build:
     name: Releasing Load Balancer
     runs-on: ubuntu-20.04
+    permissions:
+      contents: write
     steps:
 
       - name: Checkout code
