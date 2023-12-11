@@ -1,46 +1,17 @@
 use crate::health_check_service::{health_check_service, HealthCheckRequest, HealthReport};
 use crate::server::Server;
 use crate::{api_service, balancer_service};
+use anyhow::{anyhow, bail, Result};
 use async_channel::{bounded, Sender};
 use hyper::StatusCode;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use url::ParseError;
 
 pub struct Balancer {
     servers: HashMap<String, Server>,
     port: u16,
     api_port: u16,
-}
-
-#[derive(Debug)]
-pub enum BalancerError {
-    IO(std::io::Error),
-    MyError(String),
-    ConfigError(serde_yaml::Error),
-    ParseError(ParseError),
-}
-
-impl Display for BalancerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BalancerError::ConfigError(s) => {
-                write!(f, "Config Error: {}", s)?;
-            }
-            BalancerError::IO(s) => {
-                write!(f, "IO Error: {}", s)?;
-            }
-            BalancerError::MyError(s) => {
-                write!(f, "Balancer Error: {}", s)?;
-            }
-            BalancerError::ParseError(s) => {
-                write!(f, "Parsing Error: {}", s)?;
-            }
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug)]
@@ -57,7 +28,7 @@ pub enum BalancerResponse {
 }
 
 impl Balancer {
-    pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer, BalancerError> {
+    pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer> {
         if let Some(p) = path {
             let map = Balancer::read_config_file(p)?;
             return Ok(Balancer {
@@ -74,20 +45,20 @@ impl Balancer {
         })
     }
 
-    fn read_config_file(path: String) -> Result<HashMap<String, Server>, BalancerError> {
-        let f = std::fs::File::open(path).map_err(BalancerError::IO)?;
+    fn read_config_file(path: String) -> Result<HashMap<String, Server>> {
+        let f = std::fs::File::open(path)?;
         let map = Balancer::get_servers(f)?;
 
         Ok(map)
     }
 
-    fn get_servers<R: std::io::Read>(r: R) -> Result<HashMap<String, Server>, BalancerError> {
-        let d: Vec<Server> = serde_yaml::from_reader(r).map_err(BalancerError::ConfigError)?;
-        let map: Result<HashMap<String, Server>, BalancerError> = d
+    fn get_servers<R: std::io::Read>(r: R) -> Result<HashMap<String, Server>> {
+        let d: Vec<Server> = serde_yaml::from_reader(r)?;
+        let map: Result<HashMap<String, Server>> = d
             .into_iter()
             .map(|v| {
                 if let Err(error) = url::Url::parse(&v.url) {
-                    return Err(BalancerError::ParseError(error));
+                    bail!(error);
                 }
                 Ok((v.url.clone(), v))
             })
@@ -96,20 +67,18 @@ impl Balancer {
         map
     }
 
-    pub async fn listen(&mut self) -> Result<(), BalancerError> {
+    pub async fn listen(&mut self) -> Result<()> {
         // run http server
         // balancer listens for incoming requests
         // balancer decides which server to reroute request to
         // balancer updates chosen server status
         let addr: SocketAddr = ([127, 0, 0, 1], self.port).into();
 
-        let listener = TcpListener::bind(addr).await.map_err(BalancerError::IO)?;
+        let listener = TcpListener::bind(addr).await?;
         log::info!("Listening on http://{}", addr);
 
         let api_addr: SocketAddr = ([127, 0, 0, 1], self.api_port).into();
-        let api_listener = TcpListener::bind(api_addr)
-            .await
-            .map_err(BalancerError::IO)?;
+        let api_listener = TcpListener::bind(api_addr).await?;
         log::info!("API Listening on http://{}", api_addr);
 
         let (balancer_request_tx, balancer_request_rx) = bounded(1);
@@ -252,21 +221,18 @@ impl Balancer {
         Ok(())
     }
 
-    fn process_health_report(&mut self, report: HealthReport) -> Result<(), BalancerError> {
+    fn process_health_report(&mut self, report: HealthReport) -> Result<()> {
         match report {
             HealthReport::Unhealhty(url) => self.update_server_health(&url, false),
             HealthReport::Healthy(url) => self.update_server_health(&url, true),
         }
     }
 
-    fn add_server(&mut self, server: Server) -> Result<(), BalancerError> {
+    fn add_server(&mut self, server: Server) -> Result<()> {
         log::debug!("add_server");
         if self.servers.contains_key(&server.url) {
             log::debug!("contains key");
-            return Err(BalancerError::MyError(format!(
-                "a server with url {} already exists",
-                server.url
-            )));
+            bail!("a server with url {} already exists", server.url);
         }
 
         self.servers.insert(server.url.clone(), server);
@@ -274,19 +240,14 @@ impl Balancer {
         Ok(())
     }
 
-    fn delete_server(&mut self, url: String) -> Result<(), BalancerError> {
+    fn delete_server(&mut self, url: String) -> Result<()> {
         // prevent deleting all servers
         if !self.servers.contains_key(&url) {
-            return Err(BalancerError::MyError(format!(
-                "server with url {} not found",
-                url
-            )));
+            bail!("server with url {} not found", url);
         }
 
         if self.servers.len() == 1 {
-            return Err(BalancerError::MyError(
-                "balancer cannot delete the only active server".to_string(),
-            ));
+            bail!("balancer cannot delete the only active server");
         }
 
         self.servers.remove_entry(&url);
@@ -294,15 +255,10 @@ impl Balancer {
         Ok(())
     }
 
-    fn modify_server(&mut self, new_server: Server) -> Result<(), BalancerError> {
+    fn modify_server(&mut self, new_server: Server) -> Result<()> {
         // prevent disabling all servers
         let cur_server = match self.servers.get_mut(&new_server.url) {
-            None => {
-                return Err(BalancerError::MyError(format!(
-                    "failed to find server with url {}",
-                    new_server.url
-                )))
-            }
+            None => bail!("failed to find server with url {}", new_server.url),
             Some(s) => s,
         };
 
@@ -313,43 +269,31 @@ impl Balancer {
         Ok(())
     }
 
-    fn choose_next_server(&self) -> Result<String, BalancerError> {
+    fn choose_next_server(&self) -> Result<String> {
         let least_connections_server = self.servers.values().min_by(|x, y| x.cmp(y));
 
         let server = match least_connections_server {
             Some(server) => server,
-            None => {
-                return Err(BalancerError::MyError(
-                    "balancer has 0 working servers".to_string(),
-                ))
-            }
+            None => bail!("balancer has 0 working servers"),
         };
 
         Ok(server.url.clone())
     }
 
-    fn increment_server_connections(&mut self, url: String) -> Result<(), BalancerError> {
+    fn increment_server_connections(&mut self, url: String) -> Result<()> {
         match self.servers.get_mut(&url) {
             Some(server) => server.connections += 1,
-            None => {
-                return Err(BalancerError::MyError(format!(
-                    "server with url {} not found",
-                    url
-                )))
-            }
+            None => bail!("server with url {} not found", url),
         }
 
         Ok(())
     }
 
-    fn decrement_server_connections(&mut self, url: String) -> Result<(), BalancerError> {
+    fn decrement_server_connections(&mut self, url: String) -> Result<()> {
         let server = self
             .servers
             .get_mut(&url)
-            .ok_or(BalancerError::MyError(format!(
-                "failed to find server with url {}",
-                url
-            )))?;
+            .ok_or(anyhow!("failed to find server with url {}", url))?;
 
         server.connections -= 1;
 
@@ -362,11 +306,11 @@ impl Balancer {
         Ok(())
     }
 
-    fn update_server_health(&mut self, url: &str, healthy: bool) -> Result<(), BalancerError> {
+    fn update_server_health(&mut self, url: &str, healthy: bool) -> Result<()> {
         let server = self
             .servers
             .get_mut(url)
-            .ok_or(BalancerError::MyError(format!("server {} not found", url)))?;
+            .ok_or(anyhow!("server {} not found", url))?;
 
         server.healthy = healthy;
 

@@ -5,8 +5,9 @@ mod balancer_service;
 mod health_check_service;
 mod server;
 
+use anyhow::Result;
 use api_cli::{add_server, delete_server, update_server, ServerConfigs, ServerURL};
-use balancer::{Balancer, BalancerError};
+use balancer::Balancer;
 use clap::Parser;
 use clap::{Args, Subcommand};
 #[derive(Parser, Debug)]
@@ -27,17 +28,15 @@ struct BalancerParams {
     debug: bool,
 }
 
-async fn app(params: &BalancerParams) -> Result<(), BalancerError> {
+async fn app(params: &BalancerParams) -> Result<()> {
     if params.debug {
         simple_logger::SimpleLogger::new()
             .with_level(log::LevelFilter::Debug)
-            .init()
-            .map_err(|e| BalancerError::MyError(e.to_string()))?;
+            .init()?;
     } else {
         simple_logger::SimpleLogger::new()
             .with_level(log::LevelFilter::Info)
-            .init()
-            .map_err(|e| BalancerError::MyError(e.to_string()))?;
+            .init()?;
     }
     let mut balancer = Balancer::new(params.config.clone(), params.port, params.api_port)?;
     balancer.listen().await?;
@@ -75,7 +74,7 @@ async fn main() {
         Commands::DeleteServer(configs) => delete_server(configs).await,
         Commands::UpdateServer(configs) => update_server(configs).await,
     } {
-        eprintln!("{:#}", e);
+        eprintln!("error: {:#}", e);
         std::process::exit(1);
     }
 }

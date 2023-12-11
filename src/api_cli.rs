@@ -1,7 +1,8 @@
+use anyhow::{bail, Result};
 use clap::Parser;
 use reqwest::StatusCode;
 
-use crate::{balancer::BalancerError, server::Server};
+use crate::server::Server;
 
 #[derive(Parser, Debug)]
 pub(crate) struct ServerConfigs {
@@ -26,7 +27,7 @@ pub(crate) struct ServerConfigs {
     api_port: u16,
 }
 
-pub(crate) async fn add_server(configs: &ServerConfigs) -> Result<(), BalancerError> {
+pub(crate) async fn add_server(configs: &ServerConfigs) -> Result<()> {
     let server = Server {
         name: configs.name.clone(),
         health_check_period: configs.health_check_period,
@@ -36,28 +37,21 @@ pub(crate) async fn add_server(configs: &ServerConfigs) -> Result<(), BalancerEr
         healthy: false,
     };
 
-    let server_str =
-        serde_json::to_string(&server).map_err(|e| BalancerError::MyError(e.to_string()))?;
+    let server_str = serde_json::to_string(&server)?;
     let response = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{}/add", configs.api_port))
         .body(server_str)
         .send()
-        .await
-        .map_err(|e| BalancerError::MyError(e.to_string()))?;
+        .await?;
 
     if response.status() != StatusCode::OK {
-        return Err(BalancerError::MyError(
-            response
-                .text()
-                .await
-                .map_err(|e| BalancerError::MyError(e.to_string()))?,
-        ));
+        bail!(response.text().await?);
     }
 
     Ok(())
 }
 
-pub(crate) async fn update_server(configs: &ServerConfigs) -> Result<(), BalancerError> {
+pub(crate) async fn update_server(configs: &ServerConfigs) -> Result<()> {
     let server = Server {
         name: configs.name.clone(),
         health_check_period: configs.health_check_period,
@@ -67,22 +61,15 @@ pub(crate) async fn update_server(configs: &ServerConfigs) -> Result<(), Balance
         healthy: false,
     };
 
-    let server_str =
-        serde_json::to_string(&server).map_err(|e| BalancerError::MyError(e.to_string()))?;
+    let server_str = serde_json::to_string(&server)?;
     let response = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{}/update", configs.api_port))
         .body(server_str)
         .send()
-        .await
-        .map_err(|e| BalancerError::MyError(e.to_string()))?;
+        .await?;
 
     if response.status() != StatusCode::OK {
-        return Err(BalancerError::MyError(
-            response
-                .text()
-                .await
-                .map_err(|e| BalancerError::MyError(e.to_string()))?,
-        ));
+        bail!(response.text().await?);
     }
 
     Ok(())
@@ -99,21 +86,15 @@ pub(crate) struct ServerURL {
     api_port: u16,
 }
 
-pub(crate) async fn delete_server(configs: &ServerURL) -> Result<(), BalancerError> {
+pub(crate) async fn delete_server(configs: &ServerURL) -> Result<()> {
     let response = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{}/delete", configs.api_port))
         .body(configs.url.clone())
         .send()
-        .await
-        .map_err(|e| BalancerError::MyError(e.to_string()))?;
+        .await?;
 
     if response.status() != StatusCode::OK {
-        return Err(BalancerError::MyError(
-            response
-                .text()
-                .await
-                .map_err(|e| BalancerError::MyError(e.to_string()))?,
-        ));
+        bail!(response.text().await?);
     }
 
     Ok(())
