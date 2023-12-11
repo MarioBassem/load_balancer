@@ -41,7 +41,6 @@ async fn process_request(
     match (req.method(), req.uri().path()) {
         (&hyper::Method::POST, "/add") => {
             let body = req.collect().await?.to_bytes();
-            log::debug!("adding server: {:?}", body);
             let server: Server =
                 serde_json::from_slice(&body.iter().cloned().collect::<Vec<u8>>())?;
 

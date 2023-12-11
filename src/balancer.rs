@@ -109,7 +109,7 @@ impl Balancer {
         ));
 
         loop {
-            log::debug!("balancer waiting for requests...");
+            log::debug!("waiting for requests...");
             let next = match self.choose_next_server() {
                 Ok(url) => url,
                 Err(error) => {
@@ -129,7 +129,6 @@ impl Balancer {
                         }
                     };
 
-                    log::debug!("received decrement request: {:?}", req);
                     if let Err(error) = self.decrement_server_connections(req.0){
                         log::error!("failed to process decrement signal: {}", error);
                     }
@@ -143,22 +142,24 @@ impl Balancer {
                         }
                     };
 
-                    log::debug!("received balancer request: {:?}", req);
+                    log::info!("received balancer request: {:?}", req);
                     let response =  match self.process_balancer_request(req, health_check_request_tx.clone()).await{
                         Ok(()) => BalancerResponse::Ok,
-                        Err(error) => error,
+                        Err(error) => {
+                            log::error!("{:?}", error);
+                            error
+                        },
                     };
-                    log::debug!("sending balancer response: {:?}", response);
 
                     if let Err(error) = balancer_response_tx.send(response).await{
-                        log::error!("failed to send balancer responser: {}", error);
+                        log::error!("failed to send balancer response: {}", error);
                     }
                 },
                  receive_result = health_report_rx.recv() =>{
                     let report = match receive_result{
                         Ok(report) => report,
                         Err(error) =>{
-                            log::error!("failed to receive unhealthy server signal: {}", error);
+                            log::error!("failed to receive health report: {}", error);
                             continue;
                         }
                     };
@@ -188,12 +189,11 @@ impl Balancer {
     ) -> Result<(), BalancerResponse> {
         match request {
             BalancerRequest::AddServer(server) => {
-                log::debug!("balancer trying to add server: {:?}", server);
                 let (url, period) = (server.url.clone(), server.health_check_period);
                 self.add_server(server)
                     .map_err(|e| BalancerResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
-                log::debug!("sending add server to worker");
+                log::info!("server {:?} was added to balancer", url);
                 health_check_request_tx
                     .send(HealthCheckRequest::Start(url, period))
                     .await
@@ -205,6 +205,7 @@ impl Balancer {
                 self.delete_server(url.clone())
                     .map_err(|e| BalancerResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
+                log::info!("server {:?} was deleted", url);
                 health_check_request_tx
                     .send(HealthCheckRequest::Stop(url))
                     .await
@@ -213,8 +214,11 @@ impl Balancer {
                     })?;
             }
             BalancerRequest::UpdateServer(server) => {
-                self.modify_server(server)
+                let url = server.url.clone();
+                self.update_server(server)
                     .map_err(|e| BalancerResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+                log::info!("server {:?} was updated", url);
             }
         }
 
@@ -229,9 +233,7 @@ impl Balancer {
     }
 
     fn add_server(&mut self, server: Server) -> Result<()> {
-        log::debug!("add_server");
         if self.servers.contains_key(&server.url) {
-            log::debug!("contains key");
             bail!("a server with url {} already exists", server.url);
         }
 
@@ -255,7 +257,7 @@ impl Balancer {
         Ok(())
     }
 
-    fn modify_server(&mut self, new_server: Server) -> Result<()> {
+    fn update_server(&mut self, new_server: Server) -> Result<()> {
         // prevent disabling all servers
         let cur_server = match self.servers.get_mut(&new_server.url) {
             None => bail!("failed to find server with url {}", new_server.url),

@@ -21,7 +21,7 @@ pub(crate) async fn health_check_service(
     tx: Sender<HealthReport>,         // to send healthy/unhealthy servers
     rx: Receiver<HealthCheckRequest>, // to receive stop/add requests
 ) {
-    log::debug!("health check service started...");
+    log::debug!("service started...");
     let mut map = HashMap::new();
     for (url, period) in servers {
         let (mytx, myrx) = bounded(1);
@@ -33,7 +33,7 @@ pub(crate) async fn health_check_service(
         let req = match rx.recv().await {
             Ok(req) => req,
             Err(error) => {
-                log::error!("health check service failed to receive signal: {}", error);
+                log::error!("failed to receive signal: {}", error);
                 continue;
             }
         };
@@ -71,7 +71,7 @@ async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Re
         loop {
             sleep(Duration::from_secs(period)).await;
 
-            log::debug!("health check for url: {}", url);
+            log::debug!("performing health check for url: {}", url);
             let req = match reqwest::get(url.clone()).await {
                 Ok(req) => req,
                 Err(error) => {
@@ -82,12 +82,6 @@ async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Re
 
             let status = req.status().as_u16();
             if !(200..400).contains(&status) {
-                log::debug!(
-                    "server {} failed health check with status code {}",
-                    url,
-                    status
-                );
-
                 if let Err(error) = tx.send(HealthReport::Unhealhty(url.clone())).await {
                     log::error!(
                         "failed to send {} health check failure signal to balancer: {}",
@@ -96,8 +90,6 @@ async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Re
                     );
                 }
             } else {
-                log::debug!("server {} is healthy", url);
-
                 if let Err(error) = tx.send(HealthReport::Healthy(url.clone())).await {
                     log::error!(
                         "failed to send {} health check failure signal to balancer: {}",
@@ -110,21 +102,16 @@ async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Re
     });
 
     loop {
-        log::debug!("waiting for health check kill sig for server {}", url_clone);
-        tokio::select! {
-            receive_result = rx.recv() =>{
-                match receive_result{
-                    Ok(()) => (),
-                    Err(error) => {
-                        log::error!("health check worker failed to receive signal: {}", error);
-                        continue;
-                    }
-                };
-
-                log::debug!("killing health check for ");
-                handler.abort();
-                return;
+        match rx.recv().await {
+            Ok(()) => (),
+            Err(error) => {
+                log::error!("health check worker failed to receive signal: {}", error);
+                continue;
             }
-        }
+        };
+
+        log::debug!("killing health check service for {}", url_clone);
+        handler.abort();
+        return;
     }
 }
