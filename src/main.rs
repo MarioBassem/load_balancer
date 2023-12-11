@@ -17,7 +17,7 @@ struct BalancerParams {
     config: Option<String>,
 
     /// Load balancer port. load balancer will delegate incoming requests on this port to suitable server
-    #[arg(short, long, default_value_t = 3000)]
+    #[arg(short, long, default_value_t = 80)]
     port: u16,
 
     /// Load balancer api port. load balancer will accept requests to modify server configs on this port
