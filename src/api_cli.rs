@@ -27,6 +27,7 @@ pub(crate) struct ServerConfigs {
     api_port: u16,
 }
 
+/// performs an http request to add a new server to the balancer's monitored servers
 pub(crate) async fn add_server(configs: &ServerConfigs) -> Result<()> {
     let server = Server {
         name: configs.name.clone(),
@@ -51,6 +52,7 @@ pub(crate) async fn add_server(configs: &ServerConfigs) -> Result<()> {
     Ok(())
 }
 
+/// performs an http request to update a monitored server's configs
 pub(crate) async fn update_server(configs: &ServerConfigs) -> Result<()> {
     let server = Server {
         name: configs.name.clone(),
@@ -86,6 +88,7 @@ pub(crate) struct ServerURL {
     api_port: u16,
 }
 
+/// performs an http request to delete a monitored server
 pub(crate) async fn delete_server(configs: &ServerURL) -> Result<()> {
     let response = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{}/delete", configs.api_port))

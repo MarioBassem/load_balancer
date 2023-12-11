@@ -16,12 +16,14 @@ pub(crate) enum HealthReport {
     Unhealhty(String),
 }
 
+/// health check service, spawns a separate thread for each server to periodically check its health,
+/// and listens for incoming requests from the balancer to stop, add, modify current health check threads.
 pub(crate) async fn health_check_service(
     servers: Vec<(String, u64)>,
     tx: Sender<HealthReport>,         // to send healthy/unhealthy servers
     rx: Receiver<HealthCheckRequest>, // to receive stop/add requests
 ) {
-    log::debug!("service started...");
+    log::info!("service started...");
     let mut map = HashMap::new();
     for (url, period) in servers {
         let (mytx, myrx) = bounded(1);
@@ -65,6 +67,9 @@ pub(crate) async fn health_check_service(
     }
 }
 
+///  periodically sends a GET request to the specified url using the specified period,
+///  the server's health is reported back to the balancer,
+///  while waiting for a signal to stop the health check and return.
 async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Receiver<()>) {
     let url_clone = url.clone();
     let handler = tokio::spawn(async move {
@@ -84,7 +89,7 @@ async fn health_check(url: String, period: u64, tx: Sender<HealthReport>, rx: Re
             if !(200..400).contains(&status) {
                 if let Err(error) = tx.send(HealthReport::Unhealhty(url.clone())).await {
                     log::error!(
-                        "failed to send {} health check failure signal to balancer: {}",
+                        "failed to send {} health check success signal to balancer: {}",
                         url,
                         error
                     );

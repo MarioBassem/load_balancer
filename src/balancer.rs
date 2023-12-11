@@ -8,26 +8,31 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
+/// holds balancer and servers configurations
 pub struct Balancer {
     servers: HashMap<String, Server>,
     port: u16,
     api_port: u16,
 }
 
+/// api request to modify server's state
 #[derive(Debug)]
-pub enum BalancerRequest {
+pub enum APIRequest {
     AddServer(Server),
     DeleteServer(String),
     UpdateServer(Server),
 }
 
+/// api response
 #[derive(Debug)]
-pub enum BalancerResponse {
+pub enum APIResponse {
     Ok,
     Error(StatusCode, String), // status code, error message
 }
 
 impl Balancer {
+    /// creates a new balancer struct with the provided configs. if path is not provided,
+    /// the servers list will be empty and balancer will not be able to server incoming requests.
     pub fn new(path: Option<String>, port: u16, api_port: u16) -> Result<Balancer> {
         if let Some(p) = path {
             let map = Balancer::read_config_file(p)?;
@@ -45,6 +50,7 @@ impl Balancer {
         })
     }
 
+    /// reads server configurations from a yaml file
     fn read_config_file(path: String) -> Result<HashMap<String, Server>> {
         let f = std::fs::File::open(path)?;
         let map = Balancer::get_servers(f)?;
@@ -52,6 +58,7 @@ impl Balancer {
         Ok(map)
     }
 
+    /// reads server configurations from a reader
     fn get_servers<R: std::io::Read>(r: R) -> Result<HashMap<String, Server>> {
         let d: Vec<Server> = serde_yaml::from_reader(r)?;
         let map: Result<HashMap<String, Server>> = d
@@ -67,6 +74,10 @@ impl Balancer {
         map
     }
 
+    /// main thread of the balancer. it spawns three more threads:
+    ///     - http listener thread which will delegate the incoming request to the server with the least connections.
+    ///     - http api listener for handling requests to modify server configs
+    ///     - health check thread for performing periodic health checks on monitored servers
     pub async fn listen(&mut self) -> Result<()> {
         // run http server
         // balancer listens for incoming requests
@@ -144,7 +155,7 @@ impl Balancer {
 
                     log::info!("received balancer request: {:?}", req);
                     let response =  match self.process_balancer_request(req, health_check_request_tx.clone()).await{
-                        Ok(()) => BalancerResponse::Ok,
+                        Ok(()) => APIResponse::Ok,
                         Err(error) => {
                             log::error!("{:?}", error);
                             error
@@ -182,41 +193,42 @@ impl Balancer {
         }
     }
 
+    /// processes incoming requests to modify server configs
     async fn process_balancer_request(
         &mut self,
-        request: BalancerRequest,
+        request: APIRequest,
         health_check_request_tx: Sender<HealthCheckRequest>,
-    ) -> Result<(), BalancerResponse> {
+    ) -> Result<(), APIResponse> {
         match request {
-            BalancerRequest::AddServer(server) => {
+            APIRequest::AddServer(server) => {
                 let (url, period) = (server.url.clone(), server.health_check_period);
                 self.add_server(server)
-                    .map_err(|e| BalancerResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
+                    .map_err(|e| APIResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
                 log::info!("server {:?} was added to balancer", url);
                 health_check_request_tx
                     .send(HealthCheckRequest::Start(url, period))
                     .await
                     .map_err(|e| {
-                        BalancerResponse::Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                        APIResponse::Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
                     })?;
             }
-            BalancerRequest::DeleteServer(url) => {
+            APIRequest::DeleteServer(url) => {
                 self.delete_server(url.clone())
-                    .map_err(|e| BalancerResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
+                    .map_err(|e| APIResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
                 log::info!("server {:?} was deleted", url);
                 health_check_request_tx
                     .send(HealthCheckRequest::Stop(url))
                     .await
                     .map_err(|e| {
-                        BalancerResponse::Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                        APIResponse::Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
                     })?;
             }
-            BalancerRequest::UpdateServer(server) => {
+            APIRequest::UpdateServer(server) => {
                 let url = server.url.clone();
                 self.update_server(server)
-                    .map_err(|e| BalancerResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
+                    .map_err(|e| APIResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
                 log::info!("server {:?} was updated", url);
             }
@@ -225,6 +237,7 @@ impl Balancer {
         Ok(())
     }
 
+    /// processes a health check report from the health check service
     fn process_health_report(&mut self, report: HealthReport) -> Result<()> {
         match report {
             HealthReport::Unhealhty(url) => self.update_server_health(&url, false),
@@ -232,6 +245,7 @@ impl Balancer {
         }
     }
 
+    /// adds a new server to monitored servers
     fn add_server(&mut self, server: Server) -> Result<()> {
         if self.servers.contains_key(&server.url) {
             bail!("a server with url {} already exists", server.url);
@@ -242,6 +256,7 @@ impl Balancer {
         Ok(())
     }
 
+    /// deletes a monitored server
     fn delete_server(&mut self, url: String) -> Result<()> {
         // prevent deleting all servers
         if !self.servers.contains_key(&url) {
@@ -257,6 +272,7 @@ impl Balancer {
         Ok(())
     }
 
+    /// updates a monitored server
     fn update_server(&mut self, new_server: Server) -> Result<()> {
         // prevent disabling all servers
         let cur_server = match self.servers.get_mut(&new_server.url) {
@@ -271,6 +287,10 @@ impl Balancer {
         Ok(())
     }
 
+    /// chooses the next server to delegate a request to. this decision is based on:
+    ///     - server connections
+    ///     - server's weight
+    ///     - server's health condition
     fn choose_next_server(&self) -> Result<String> {
         let least_connections_server = self.servers.values().min_by(|x, y| x.cmp(y));
 
@@ -282,6 +302,7 @@ impl Balancer {
         Ok(server.url.clone())
     }
 
+    /// increments a server's connections
     fn increment_server_connections(&mut self, url: String) -> Result<()> {
         match self.servers.get_mut(&url) {
             Some(server) => server.connections += 1,
@@ -291,6 +312,7 @@ impl Balancer {
         Ok(())
     }
 
+    /// decrements a server's connections
     fn decrement_server_connections(&mut self, url: String) -> Result<()> {
         let server = self
             .servers
@@ -308,6 +330,7 @@ impl Balancer {
         Ok(())
     }
 
+    /// updates a server's health with the provided `healty` flag
     fn update_server_health(&mut self, url: &str, healthy: bool) -> Result<()> {
         let server = self
             .servers
@@ -421,7 +444,7 @@ mod test {
         let (tx, rx) = bounded(1);
         let url = "http://128.1.1.3:4000".to_string();
         let url_clone = url.clone();
-        let request = crate::balancer::BalancerRequest::AddServer(Server {
+        let request = crate::balancer::APIRequest::AddServer(Server {
             url: url.clone(),
             name: "server3".to_string(),
             weight: 5,
@@ -471,7 +494,7 @@ mod test {
         let (tx, rx) = bounded(1);
         let url = "http://127.0.0.1:3001".to_string();
         let url_clone = url.clone();
-        let request = crate::balancer::BalancerRequest::DeleteServer(url.clone());
+        let request = crate::balancer::APIRequest::DeleteServer(url.clone());
 
         let rx_clone = rx.clone();
         tokio::spawn(async move {
@@ -503,7 +526,7 @@ mod test {
         let mut balancer = Balancer::new(Some("config.yaml".to_string()), 3000, 3001).unwrap();
         let (tx, _) = bounded(1);
         let url = "http://127.0.0.1:3001".to_string();
-        let request = crate::balancer::BalancerRequest::UpdateServer(Server {
+        let request = crate::balancer::APIRequest::UpdateServer(Server {
             url: url.clone(),
             name: "server4".to_string(),
             weight: 10,

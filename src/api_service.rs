@@ -6,13 +6,13 @@ use hyper::{body::Incoming, Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
-use crate::balancer::{BalancerRequest, BalancerResponse};
+use crate::balancer::{APIRequest, APIResponse};
 use crate::server::Server;
 
 pub(crate) async fn balancer_api_listener(
     listener: TcpListener,
-    tx: Sender<BalancerRequest>,
-    rx: Receiver<BalancerResponse>,
+    tx: Sender<APIRequest>,
+    rx: Receiver<APIResponse>,
 ) {
     loop {
         let tx = tx.clone();
@@ -35,8 +35,8 @@ pub(crate) async fn balancer_api_listener(
 
 async fn process_request(
     req: Request<Incoming>,
-    tx: Sender<BalancerRequest>,
-    rx: Receiver<BalancerResponse>,
+    tx: Sender<APIRequest>,
+    rx: Receiver<APIResponse>,
 ) -> Result<Response<String>, Box<dyn std::error::Error + Send + Sync>> {
     match (req.method(), req.uri().path()) {
         (&hyper::Method::POST, "/add") => {
@@ -44,20 +44,20 @@ async fn process_request(
             let server: Server =
                 serde_json::from_slice(&body.iter().cloned().collect::<Vec<u8>>())?;
 
-            tx.send(BalancerRequest::AddServer(server)).await?;
+            tx.send(APIRequest::AddServer(server)).await?;
         }
         (&hyper::Method::POST, "/delete") => {
             let body = req.collect().await?.to_bytes();
             let url = String::from_utf8(body.iter().cloned().collect::<Vec<u8>>())?;
 
-            tx.send(BalancerRequest::DeleteServer(url)).await?;
+            tx.send(APIRequest::DeleteServer(url)).await?;
         }
         (&hyper::Method::POST, "/update") => {
             let body = req.collect().await?.to_bytes();
             let server: Server =
                 serde_json::from_slice(&body.iter().cloned().collect::<Vec<u8>>())?;
 
-            tx.send(BalancerRequest::UpdateServer(server)).await?;
+            tx.send(APIRequest::UpdateServer(server)).await?;
         }
         (_, _) => {
             return Ok(Response::builder()
@@ -68,11 +68,11 @@ async fn process_request(
     };
 
     let resp = match rx.recv().await {
-        Ok(BalancerResponse::Ok) => Response::builder()
+        Ok(APIResponse::Ok) => Response::builder()
             .status(hyper::StatusCode::OK)
             .body("".to_string())
             .unwrap(),
-        Ok(BalancerResponse::Error(code, message)) => {
+        Ok(APIResponse::Error(code, message)) => {
             Response::builder().status(code).body(message).unwrap()
         }
         Err(error) => Response::builder()

@@ -8,6 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 #[derive(Debug)]
 pub(crate) struct DecrementSignal(pub String);
 
+/// listens for tcp connections, delegates the request to the suitable server, and after receiving a response from the server, passes the response back to connection.
 pub(crate) async fn balancer_listener(
     listener: TcpListener,
     tx: Sender<DecrementSignal>,
@@ -53,6 +54,7 @@ pub(crate) async fn balancer_listener(
     }
 }
 
+/// delegates a request to the provided url, returns back received response
 async fn delegate(
     url: String,
     req: Request<Incoming>,
