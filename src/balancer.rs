@@ -227,10 +227,24 @@ impl Balancer {
             }
             APIRequest::UpdateServer(server) => {
                 let url = server.url.clone();
+                let period = server.health_check_period;
                 self.update_server(server)
                     .map_err(|e| APIResponse::Error(StatusCode::BAD_REQUEST, e.to_string()))?;
 
                 log::info!("server {:?} was updated", url);
+                health_check_request_tx
+                    .send(HealthCheckRequest::Stop(url.clone()))
+                    .await
+                    .map_err(|e| {
+                        APIResponse::Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                    })?;
+
+                health_check_request_tx
+                    .send(HealthCheckRequest::Start(url, period))
+                    .await
+                    .map_err(|e| {
+                        APIResponse::Error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                    })?;
             }
         }
 
